@@ -350,6 +350,7 @@ class gem5Build(PerHostJob):
         self,
         config: "gem5ProjectConfiguration",
         name: str,
+        demand: int | None = None,
         threads: int | None = None,
         experiment: str = "builds",
         **options,
@@ -372,6 +373,7 @@ class gem5Build(PerHostJob):
             paths.gem5_out_base_dir() / experiment / name,
         )
         self._cwd = paths.project_dir()
+        self._demand = demand or 1
         self._threads = threads or 1
 
     def spec(self):
@@ -389,7 +391,7 @@ class gem5Build(PerHostJob):
             + shlex.quote(str(spec_path)),
             f"build {self._spec.name}",
             outdir,
-            self._threads,
+            self._demand,
             id,
             dumps=[("build.json", self._spec.to_json(), spec_path)],
         )
@@ -411,9 +413,7 @@ class gem5Experiment(Experiment):
         if outdir is None:
             raise ValueError(f"gem5Experiment {name}: outdir is required")
         if gem5_path is None and build is None:
-            raise ValueError(
-                f"gem5Experiment {name}: give gem5_path or build"
-            )
+            raise ValueError(f"gem5Experiment {name}: give gem5_path or build")
         super().__init__(name, Path(outdir).resolve())
         self._cwd = Path(cwd).resolve()
         self._build = build
