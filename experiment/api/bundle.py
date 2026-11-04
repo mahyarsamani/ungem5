@@ -149,7 +149,13 @@ def _data(tree: ast.AST, path: Path, root: Path) -> list[str]:
         if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
             continue
         text = node.value
-        if not text or "\n" in text or len(text) > 400 or text in (".", ".."):
+        if not text or "\n" in text or len(text) > 400:
+            continue
+        # NOTE: "." and "./" are separators and prefixes far more often
+        # than paths; never take them for the directory they'd name.
+        if all(part in (".", "..") for part in Path(text).parts) or text.strip(
+            "./"
+        ) == "":
             continue
         if "/" not in text and "." not in text:
             continue
