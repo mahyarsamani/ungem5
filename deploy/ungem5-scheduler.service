@@ -1,0 +1,27 @@
+# The lab scheduler, on one machine (liberty). It runs as the system account
+# `ungem5`, never runs users' code, and takes commands from members of
+# coe-us-cs-darchr over /run/ungem5/scheduler.sock.
+[Unit]
+Description=ungem5 lab scheduler
+Wants=network-online.target
+After=network-online.target remote-fs.target sssd.service
+
+[Service]
+User=ungem5
+Group=ungem5
+# NOTE: The name, socket, port, groups and admins come from
+# /etc/ungem5/config.toml.
+ExecStart=/opt/ungem5/venv/bin/python -m ungem5.schedule.daemon --lab
+# NOTE: /run/ungem5 holds the socket that everyone opens; the lock lives
+# in its private subdirectory, and the state in /var/lib/ungem5.
+RuntimeDirectory=ungem5
+RuntimeDirectoryMode=0755
+StateDirectory=ungem5
+Environment=XDG_STATE_HOME=/var/lib/ungem5
+Environment=UNGEM5_RUNTIME_DIR=/run/ungem5/private
+Environment=UNGEM5_PKI_DIR=/etc/ungem5/pki
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

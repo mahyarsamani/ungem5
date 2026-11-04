@@ -996,7 +996,7 @@ class Console:
         return True
 
     def run(self) -> int:
-        history = Path.home() / ".local" / "state" / "experiment"
+        history = Path.home() / ".local" / "state" / "ungem5"
         history.mkdir(parents=True, exist_ok=True)
         session = PromptSession(
             history=FileHistory(str(history / "console_history")),

@@ -23,7 +23,7 @@ from werkzeug.serving import make_server
 from .host import HostUnreachable, JobError
 from .scheduler import Caller, CommandError, Scheduler, current_user
 
-COOKIE = "experiment_dashboard"
+COOKIE = "ungem5_dashboard"
 CHUNK = 256 * 1024
 
 

@@ -1,9 +1,9 @@
 """Where the scheduler keeps its lock, control socket, and saved state.
 
-- Runtime files (lock, socket) live in /tmp/experiment-<uid>, a local,
+- Runtime files (lock, socket) live in /tmp/ungem5-<uid>, a local,
   private (0700) directory. flock is unreliable on NFS, which is where home
   directories often are.
-- The state file lives in ~/.local/state/experiment/<hostname>/<name>, keyed
+- The state file lives in ~/.local/state/ungem5/<hostname>/<name>, keyed
   by hostname because the home directory is often shared between machines.
 """
 
@@ -21,8 +21,8 @@ STATE_VERSION = 2
 
 def runtime_dir() -> Path:
     path = Path(
-        os.environ.get("EXPERIMENT_RUNTIME_DIR")
-        or f"/tmp/experiment-{os.getuid()}"
+        os.environ.get("UNGEM5_RUNTIME_DIR")
+        or f"/tmp/ungem5-{os.getuid()}"
     )
     path.mkdir(mode=0o700, exist_ok=True)
     info = path.lstat()
@@ -41,7 +41,7 @@ def socket_path() -> Path:
 
 def state_dir(name: str) -> Path:
     base = os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state"
-    path = Path(base) / "experiment" / platform.node() / name
+    path = Path(base) / "ungem5" / platform.node() / name
     path.mkdir(parents=True, exist_ok=True)
     return path
 

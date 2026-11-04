@@ -306,7 +306,7 @@ def test_a_root_worker_runs_jobs_as_their_owner_in_a_unit(tmp_path, as_root):
     )
     options = as_root.read_text().splitlines()
     assert f"--uid={os.getuid()}" in options
-    assert f"--slice=experiment-{worker_module.unit_name(ME)}.slice" in options
+    assert f"--slice=ungem5-{worker_module.unit_name(ME)}.slice" in options
     deadline = time.time() + 10
     while resolve_status(outdir)[0] == "running" and time.time() < deadline:
         time.sleep(0.1)

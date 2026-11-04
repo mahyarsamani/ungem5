@@ -199,7 +199,7 @@ def compile_in_subprocess(
     imported modules.
     `known_hosts` are host views from the scheduler's snapshot. The
     script's own output goes to this process's stdout and stderr."""
-    with tempfile.TemporaryDirectory(prefix="experiment-load-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="ungem5-load-") as tmp:
         hosts_path = Path(tmp) / "hosts.json"
         out_path = Path(tmp) / "compiled.json"
         hosts_path.write_text(json.dumps(known_hosts))

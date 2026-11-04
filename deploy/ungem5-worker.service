@@ -1,0 +1,17 @@
+# The lab worker, one per machine: it launches each job as its owner, in a
+# transient unit of its own in ungem5-<owner>.slice. Jobs are their own
+# units, so they outlive restarts of this one.
+[Unit]
+Description=ungem5 worker (launches lab jobs as their owners)
+Wants=network-online.target
+After=network-online.target remote-fs.target sssd.service
+
+[Service]
+# NOTE: The port and who may run jobs come from /etc/ungem5/config.toml.
+ExecStart=/opt/ungem5/venv/bin/helper work --name %H
+Environment=UNGEM5_PKI_DIR=/etc/ungem5/pki
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

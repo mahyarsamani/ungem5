@@ -27,10 +27,10 @@ CA_NAME = "ca"
 
 
 def pki_dir() -> Path:
-    env = os.environ.get("EXPERIMENT_PKI_DIR")
+    env = os.environ.get("UNGEM5_PKI_DIR")
     if env:
         return Path(env).expanduser()
-    return Path.home() / ".config" / "experiment" / "pki"
+    return Path.home() / ".config" / "ungem5" / "pki"
 
 
 def paths(name: str, directory: Path | None = None) -> tuple[Path, Path]:

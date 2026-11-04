@@ -12,8 +12,8 @@ def parse_certs_args(args):
     parser = argparse.ArgumentParser(
         prog="helper certs",
         description="Manage the certificates that secure scheduler <-> "
-        "worker connections. Files live in ~/.config/experiment/pki (or "
-        "$EXPERIMENT_PKI_DIR).",
+        "worker connections. Files live in ~/.config/ungem5/pki (or "
+        "$UNGEM5_PKI_DIR).",
     )
     parser.add_argument(
         "--dir", type=Path, help="Use this directory instead of the default."

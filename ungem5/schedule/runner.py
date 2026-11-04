@@ -337,7 +337,7 @@ def main(argv: list[str] | None = None) -> int:
                 cwd=args.cwd,
                 # NOTE: So job commands can run this package's modules with
                 # the worker's own Python, e.g. ungem5.run.simulate.
-                env=dict(os.environ, EXPERIMENT_PYTHON=sys.executable),
+                env=dict(os.environ, UNGEM5_PYTHON=sys.executable),
                 stdin=subprocess.DEVNULL,
                 stdout=out,
                 stderr=err,

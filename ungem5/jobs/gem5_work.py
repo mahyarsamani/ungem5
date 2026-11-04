@@ -373,7 +373,7 @@ class gem5Job(Job):
             experiment.cwd(),
             # NOTE: The worker's Python runs the spec and becomes gem5; see
             # ungem5.run.simulate.
-            '"$EXPERIMENT_PYTHON" -m ungem5.run.simulate '
+            '"$UNGEM5_PYTHON" -m ungem5.run.simulate '
             + shlex.quote(str(spec_path)),
             gem5Job.make_shorthand_command(
                 experiment.gem5_path(), run_script_path, *args, **kwargs
@@ -519,7 +519,7 @@ class gem5Build(PerHostJob):
         return Job(
             self.experiment(),
             self._cwd,
-            '"$EXPERIMENT_PYTHON" -m ungem5.run.build '
+            '"$UNGEM5_PYTHON" -m ungem5.run.build '
             + shlex.quote(str(spec_path)),
             f"build {self._spec.name}",
             outdir,

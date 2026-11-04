@@ -1,9 +1,9 @@
 """Service settings: ports, who may run jobs, who administers, sockets.
 
-They live in /etc/experiment/config.toml, which root owns, so a worker run
+They live in /etc/ungem5/config.toml, which root owns, so a worker run
 by root can trust them; command-line flags override them. A user's own
-~/.config/experiment/config.toml may set the [lab] section only, which says
-where `helper console --lab` finds the lab scheduler. $EXPERIMENT_CONFIG
+~/.config/ungem5/config.toml may set the [lab] section only, which says
+where `helper console --lab` finds the lab scheduler. $UNGEM5_CONFIG
 names another system file (and skips the user's), for tests.
 
     [worker]
@@ -11,17 +11,17 @@ names another system file (and skips the user's), for tests.
     bind = "0.0.0.0"
     allow_gids = [1024023017]   # run by root: who may run jobs
     min_uid = 1000
-    store = "/var/lib/experiment"
+    store = "/var/lib/ungem5"
 
     [scheduler]                 # the lab scheduler
     name = "lab"
-    socket = "/run/experiment/scheduler.sock"
+    socket = "/run/ungem5/scheduler.sock"
     dashboard_port = 9200
     allow_gids = [1024023017]
     admins = ["msamani"]        # names, or numeric uids
 
     [lab]
-    socket = "/run/experiment/scheduler.sock"
+    socket = "/run/ungem5/scheduler.sock"
 """
 
 import os
@@ -30,8 +30,8 @@ import tomllib
 
 from pathlib import Path
 
-SYSTEM_FILE = Path("/etc/experiment/config.toml")
-USER_FILE = Path("~/.config/experiment/config.toml")
+SYSTEM_FILE = Path("/etc/ungem5/config.toml")
+USER_FILE = Path("~/.config/ungem5/config.toml")
 # NOTE: What a user's file may set.
 USER_SECTIONS = ("lab",)
 
@@ -41,16 +41,16 @@ DEFAULTS: dict = {
         "bind": "0.0.0.0",
         "allow_gids": [],
         "min_uid": 1000,
-        "store": "/var/lib/experiment",
+        "store": "/var/lib/ungem5",
     },
     "scheduler": {
         "name": "lab",
-        "socket": "/run/experiment/scheduler.sock",
+        "socket": "/run/ungem5/scheduler.sock",
         "dashboard_port": 9200,
         "allow_gids": [],
         "admins": [],
     },
-    "lab": {"socket": "/run/experiment/scheduler.sock"},
+    "lab": {"socket": "/run/ungem5/scheduler.sock"},
 }
 
 
@@ -70,12 +70,12 @@ def _read(path: Path) -> dict:
 
 def load(system: Path | None = None, user: Path | None = None) -> dict:
     """The settings: the defaults, under the system file (SYSTEM_FILE, or
-    $EXPERIMENT_CONFIG), under the user's file (USER_FILE; its
+    $UNGEM5_CONFIG), under the user's file (USER_FILE; its
     USER_SECTIONS only). Unknown keys are refused, so a typo can't
     silently leave a default in place."""
     if system is None:
-        system = Path(os.environ.get("EXPERIMENT_CONFIG") or SYSTEM_FILE)
-    if user is None and "EXPERIMENT_CONFIG" not in os.environ:
+        system = Path(os.environ.get("UNGEM5_CONFIG") or SYSTEM_FILE)
+    if user is None and "UNGEM5_CONFIG" not in os.environ:
         user = USER_FILE
     settings = {section: dict(values) for section, values in DEFAULTS.items()}
     sources = [(system, DEFAULTS.keys())]

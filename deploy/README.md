@@ -3,11 +3,11 @@
 One scheduler serves the whole lab from liberty, and every machine runs one worker as root.
 Members of `coe-us-cs-darchr` (gid 1024023017) load their own scripts, see everyone's jobs, and change only their own.
 Admins (`admins` in the config file) also change hosts, limits and partitions.
-Each job runs as the user who loaded it, in its own systemd unit inside `experiment-<user>.slice`.
+Each job runs as the user who loaded it, in its own systemd unit inside `ungem5-<user>.slice`.
 
 ## How the pieces trust each other
 
-- A user's console talks to the scheduler over `/run/experiment/scheduler.sock` on liberty; the kernel tells the scheduler which user is on the other end.
+- A user's console talks to the scheduler over `/run/ungem5/scheduler.sock` on liberty; the kernel tells the scheduler which user is on the other end.
 - The console runs the user's load script itself, as that user, and sends the scheduler plain data, so the scheduler never runs anyone's code.
 - The scheduler talks to the workers over mutual TLS, as before; a worker accepts only the scheduler's certificate.
 - A worker launches a job only for an owner whose uid is at least 1000 and who is in group 1024023017.
@@ -16,10 +16,10 @@ Each job runs as the user who loaded it, in its own systemd unit inside `experim
 ## Install (once per machine, as root)
 
 ```bash
-mkdir -p /etc/experiment
-cp deploy/config.toml /etc/experiment/config.toml   # ports, groups, admins
-python3 -m venv /opt/experiment/venv
-/opt/experiment/venv/bin/pip install "experiment[model] @ git+https://github.com/mahyarsamani/experiment.git@<commit>"
+mkdir -p /etc/ungem5
+cp deploy/config.toml /etc/ungem5/config.toml   # ports, groups, admins
+python3 -m venv /opt/ungem5/venv
+/opt/ungem5/venv/bin/pip install "ungem5[model] @ git+https://github.com/mahyarsamani/experiment.git@<commit>"
 ```
 
 The `model` extra (scikit-learn) gives the scheduler a learned memory estimate once 50 runs have finished; the workers don't need it.
@@ -36,19 +36,19 @@ helper certs issue scheduler
 helper certs issue worker <host> --san <host's fqdn>   # for every host
 ```
 
-Then copy them to `/etc/experiment/pki/` on each machine:
+Then copy them to `/etc/ungem5/pki/` on each machine:
 
 | Machine | Files | Owner | Mode |
 |---|---|---|---|
-| liberty | `ca.crt`, `scheduler.crt`, `scheduler.key` | `experiment` | 0600 for the key |
+| liberty | `ca.crt`, `scheduler.crt`, `scheduler.key` | `ungem5` | 0600 for the key |
 | every worker | `ca.crt`, `<host>.crt`, `<host>.key` | `root` | 0600 for the key |
 
 ## Workers (every machine, as root)
 
 ```bash
-cp deploy/experiment-worker.service /etc/systemd/system/
+cp deploy/ungem5-worker.service /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now experiment-worker
+systemctl enable --now ungem5-worker
 ```
 
 The worker listens on the `[worker] port` of the config file, 9100 by default.
@@ -57,13 +57,13 @@ On perle another process holds 9100: set another port in its config file, and gi
 ## The scheduler (liberty, as root)
 
 ```bash
-useradd --system --home-dir /var/lib/experiment --shell /usr/sbin/nologin experiment
-cp deploy/experiment-scheduler.service /etc/systemd/system/
+useradd --system --home-dir /var/lib/ungem5 --shell /usr/sbin/nologin ungem5
+cp deploy/ungem5-scheduler.service /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now experiment-scheduler
+systemctl enable --now ungem5-scheduler
 ```
 
-The state, the memory history and the logs live in `/var/lib/experiment/experiment/liberty/lab/`.
+The state, the memory history and the logs live in `/var/lib/ungem5/ungem5/liberty/lab/`.
 
 ## First steps (an admin, on liberty)
 

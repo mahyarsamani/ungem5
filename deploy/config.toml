@@ -1,4 +1,4 @@
-# /etc/experiment/config.toml: the lab's settings, owned by root.
+# /etc/ungem5/config.toml: the lab's settings, owned by root.
 # Flags on `helper work` and the scheduler override these.
 
 [worker]
@@ -6,14 +6,14 @@ port = 9100              # perle: another port, and the same in hosts.py
 bind = "0.0.0.0"
 allow_gids = [1024023017]  # coe-us-cs-darchr: who may run jobs here
 min_uid = 1000
-store = "/var/lib/experiment"
+store = "/var/lib/ungem5"
 
 [scheduler]              # the lab scheduler, on liberty
 name = "lab"
-socket = "/run/experiment/scheduler.sock"
+socket = "/run/ungem5/scheduler.sock"
 dashboard_port = 9200
 allow_gids = [1024023017]
 admins = ["msamani"]     # names, or numeric uids
 
 [lab]                    # where `helper console --lab` looks, on any host
-socket = "/run/experiment/scheduler.sock"
+socket = "/run/ungem5/scheduler.sock"

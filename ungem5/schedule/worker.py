@@ -8,7 +8,7 @@ tuples) so rpyc passes them by value rather than as remote references.
 Every job has an owner, a user name. A worker run by a user launches only
 that user's jobs, as its own children. A worker run by root (the lab setup)
 launches each job as its owner, in a transient systemd unit of its own in
-the slice experiment-<owner>.slice, so jobs outlive the worker and get their
+the slice ungem5-<owner>.slice, so jobs outlive the worker and get their
 own cgroup; owners must have a uid of at least `min_uid` and be in one of
 the groups `allow_gids`. Either way, a job's files are only ever touched as its owner
 (see `userio.py`).
@@ -56,7 +56,7 @@ PROTOCOL_CONFIG = {
 
 def default_store() -> Path:
     cache = os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache"
-    return Path(cache) / "experiment" / "store"
+    return Path(cache) / "ungem5" / "store"
 
 
 def unit_name(user: str) -> str:
@@ -80,7 +80,7 @@ class Worker(rpyc.Service):
     ) -> None:
         """
         :param store: where bundles and working directories go, under
-            <store>/<hostname>/<user>; by default ~/.cache/experiment/store
+            <store>/<hostname>/<user>; by default ~/.cache/ungem5/store
             of the user running the worker.
         """
         super().__init__()
@@ -265,14 +265,14 @@ class Worker(rpyc.Service):
     ) -> str:
         user = unit_name(account.pw_name)
         digest = hashlib.sha1(f"{outdir} {time.time()}".encode()).hexdigest()
-        unit = f"experiment-{user}-{digest[:12]}"
+        unit = f"ungem5-{user}-{digest[:12]}"
         result = subprocess.run(
             [
                 "systemd-run",
                 "--quiet",
                 "--collect",
                 f"--unit={unit}",
-                f"--slice=experiment-{user}.slice",
+                f"--slice=ungem5-{user}.slice",
                 f"--uid={account.pw_uid}",
                 f"--gid={account.pw_gid}",
                 "--",
@@ -371,7 +371,7 @@ class Worker(rpyc.Service):
             return True
         with open(f"/proc/{pid}/cgroup") as f:
             path = f.read().strip().partition("::")[2]
-        slice_dir = f"/experiment.slice/experiment-{unit_name(user)}.slice/"
+        slice_dir = f"/ungem5.slice/ungem5-{unit_name(user)}.slice/"
         if not path.startswith(slice_dir):
             raise PermissionError(f"{outdir}'s job runs outside {slice_dir}")
         with open(f"/sys/fs/cgroup{path}/cgroup.freeze", "w") as f:
@@ -390,7 +390,7 @@ class Worker(rpyc.Service):
                 "systemctl",
                 "set-property",
                 "--runtime",
-                f"experiment-{unit_name(user)}.slice",
+                f"ungem5-{unit_name(user)}.slice",
                 f"MemoryMax={'infinity' if limit is None else int(limit)}",
             ],
             stdin=subprocess.DEVNULL,

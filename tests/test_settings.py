@@ -35,7 +35,7 @@ def test_defaults_then_system_then_user(tmp_path):
 def test_the_environment_names_the_system_file(tmp_path, monkeypatch):
     other = tmp_path / "other.toml"
     other.write_text("[worker]\nport = 7\n")
-    monkeypatch.setenv("EXPERIMENT_CONFIG", str(other))
+    monkeypatch.setenv("UNGEM5_CONFIG", str(other))
     assert settings.load()["worker"]["port"] == 7
 
 
