@@ -6,3 +6,8 @@ build/
 dist/
 *.log
 *.console_history
+
+# NOTE: The stats tutorial's data, copied by hand (23 MB and 1 MB).
+example_data/
+examples/sift/data/
+.ipynb_checkpoints/

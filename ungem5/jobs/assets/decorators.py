@@ -25,6 +25,15 @@ def expose_project_dir(run):
     return wrapper
 
 
+# NOTE: The files `record_args` writes and `clear_outdir` deletes. gem5 runs
+# this file without ungem5 on its path, so the names are spelled out here;
+# `ungem5/jobs/markers.py` is their source of truth, and a test checks that
+# these match it.
+PARAMS_FILE = "params.json"
+CALLED_MARKER = "run_function_called"
+FINISHED_MARKER = "simulation_finished"
+
+
 def record_args(run):
     def wrapper(*args, **kwargs):
         try:
@@ -45,11 +54,11 @@ def record_args(run):
                 "you should do that using argparse with default values."
             )
 
-        with open(outdir / "params.json", "w") as par_ser:
+        with open(outdir / PARAMS_FILE, "w") as par_ser:
             json.dump(params, par_ser, indent=2, default=str)
-        (outdir / "run_function_called").touch()
+        (outdir / CALLED_MARKER).touch()
         run(*args, **kwargs)
-        (outdir / "simulation_finished").touch()
+        (outdir / FINISHED_MARKER).touch()
 
     return wrapper
 
@@ -65,10 +74,10 @@ def clear_outdir(run):
 
         def should_delete(item_name: str):
             if item_name in [
-                "params.json",
+                PARAMS_FILE,
                 "process_info.txt",
-                "run_function_called",
-                "simulation_finished",
+                CALLED_MARKER,
+                FINISHED_MARKER,
             ]:
                 return True
 

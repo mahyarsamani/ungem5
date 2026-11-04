@@ -23,6 +23,8 @@ dependencies = [
 dev = ["pytest"]
 # NOTE: The learned memory estimate (ungem5/schedule/model.py).
 model = ["scikit-learn"]
+# NOTE: The stats core (ungem5/stats/) exports to pandas.
+stats = ["pandas>=2"]
 
 [project.urls]
 Homepage = "https://github.com/mahyarsamani/experiment"
