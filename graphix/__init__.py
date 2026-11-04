@@ -6,12 +6,13 @@ Typical use:
 
     runs = gx.RunSet.from_dirs("example_data/*/*", labels=my_labels)
     cycles = runs["numCycles"]                       # a Scalar across runs
-    l1d = runs["usefulBytes"].select(owner="*.dcache.cache")
-    merged = l1d.merge(over="owner")                 # one histogram per run
+    lat = runs["outTransLatHist"].select(owner="*.dcache")
+    merged = lat.merge(over="owner")                 # one histogram per run and event
     merged.to_frame()                                # a pandas DataFrame
 
 Extend it with `StatSpec`s for your own stats and an `OwnerScheme` for
-canonical owner names; see `examples/sift/`.
+canonical owner names, kept in your project; the tutorial in `examples/`
+shows how.
 """
 
 from .config import ConfigTree, SimObject

@@ -1,7 +1,7 @@
 # graphix improvement plan
 
 Date: 2026-11-03.
-Status: proposed; nothing below is implemented.
+Status: phases 1 to 4 implemented on `redesign` the same day (see "Outcome" at the end); the project side waits for the author's review.
 
 ## Why
 
@@ -100,3 +100,13 @@ Phases 2 and 3 are independent and can be reviewed as separate diffs.
 4. Do the agent branches' graphix PRs (#1 to #3) and `agent/wp2`'s local commit close as superseded once their specs move to the project?
 5. graphix's `redesign` branch is still unpushed; should the work land on `redesign`, or on `main` after you push `redesign` to it?
 6. Like `tools/experiment`, may graphix break its API freely during this work (no shims for old imports), given that every caller is updated in the same change?
+
+Answers (author, 2026-11-03): 1, `projects/sift/analysis/sift_stats/`; 2, decide so that the later merge into `tools/experiment` is easiest (done: the source lives in graphix and imports experiment's own file names from `experiment.api.runner`); 3, yes, both venvs; 4, yes, once their specs move; 5, on `redesign`; 6, yes.
+
+## Outcome (2026-11-03)
+
+- Between this plan and its implementation the SIFT project replaced its v1 to v3 analyses with `analysis/sift_sets.py` (one loader) and `motivation.py`, `results.py`, `roi.py`; the identity check used those on the v5 set (E41) and the v5-against-v4 comparison.
+- Identity: all nine v5 CSVs and `roi_v5_vs_v4.csv` are byte-identical to the committed ones after every phase.
+- Speed, 125 v5 runs on cascade: about 104 s before; 93 s cold and 31.5 s warm on one process after phase 2, 44 s cold on 8 processes; a median run (27 MB) loads in 0.50 s, 0.25 s from the cache.
+- The scripts still compute their own tail-aware quantiles (`sift_sets.latency_quantile`, NaN in the overflow); graphix's now count the tails too (inf in the overflow), so they can switch when convenient.
+- Not done: closing graphix PRs #1 to #3 and the local `agent/wp2` branch (outward-facing; waiting for the author), the aarch64 venv install, and the thesis script's switch to `sift_stats` (the author's file; a proposed diff only).

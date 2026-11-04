@@ -493,8 +493,9 @@ class RunSet:
             # A run where gem5 printed none of the stat (all zero) still gets
             # zeros when the stat has no dims; with dims, only the dim values
             # that run printed are known. Histograms are never filled into
-            # such a run: a variant that never samples one (a ref run's
-            # hovLdindE2ELatency) has no histogram, not an empty one.
+            # such a run: a variant that never samples one (a baseline run of
+            # a stat only the new design adds) has no histogram, not an
+            # empty one.
             no_dims = all(dims == () for entries in raw.values() for (_, dims, _) in entries)
             if no_dims and not issubclass(cls, Histogram):
                 for run in self.runs:

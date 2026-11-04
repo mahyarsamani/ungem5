@@ -53,7 +53,7 @@ FORMULA_SKIPS = [
         r"cpi|ipc|issueRate|fuBusyRate"
         r"|fetchStats\d+\.(fetchRate|branchRate)"
         r"|executeStats\d+\.(numStoreInsts|instRate)"
-        r"|commitStats\d+\.(cpi|ipc|numArchMemRefs|hovIndirectFrac)"
+        r"|commitStats\d+\.(cpi|ipc|numArchMemRefs)"
         r"|iew\.(branchMispredicts|wbRate|wbFanout)"
         r"|fetch\.idleRate",
         "Formula",

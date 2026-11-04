@@ -11,8 +11,8 @@ A job directory holds:
 - `params.json` (the run function's arguments by name) and the markers
   `run_function_called` and `simulation_finished`, written by the project's
   run script through experiment's `record_args` decorator;
-- whatever the project's own code writes (SIFT's `window.json`), which a
-  caller judges with its own `done` predicate.
+- whatever the project's own code writes (a measurement window file, for
+  example), which a caller judges with its own `done` predicate.
 
 A job is `done` when its `exit.json` reports return code 0, no signal and no
 error, and the run script left `simulation_finished`.
