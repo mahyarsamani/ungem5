@@ -1,0 +1,4 @@
+---------- Begin Simulation Statistics ----------
+simSeconds                                   0.000854                       # Number of seconds simulated (Second)
+simTicks                                     notanumber                     # Number of ticks simulated (Tick)
+---------- End Simulation Statistics   ----------

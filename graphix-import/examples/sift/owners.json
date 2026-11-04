@@ -1,0 +1,31 @@
+{
+  "mapping": {
+    "tile{t}.cluster{c}.l1d": [
+      "board.cache_hierarchy.core_tiles{t}.core_clusters{c}.dcache",
+      "board.cache_hierarchy.core_tiles{t}.core_clusters{c}.l1dcache"
+    ],
+    "tile{t}.cluster{c}.l1i": [
+      "board.cache_hierarchy.core_tiles{t}.core_clusters{c}.icache",
+      "board.cache_hierarchy.core_tiles{t}.core_clusters{c}.l1icache"
+    ],
+    "tile{t}.cluster{c}.l2": [
+      "board.cache_hierarchy.core_tiles{t}.core_clusters{c}.l2cache",
+      "board.cache_hierarchy.core_tiles{t}.core_clusters{c}.l2"
+    ],
+    "tile{t}.cluster{c}": [
+      "board.cache_hierarchy.core_tiles{t}.core_clusters{c}"
+    ],
+    "core{n}": [
+      "board.processor.cores{n}.core",
+      "board.processor.setup{n}.core"
+    ],
+    "slc{s}": ["board.cache_hierarchy.system_caches{s}.cache_slice"],
+    "dir{s}": ["board.cache_hierarchy.system_caches{s}.directory"],
+    "memctrl{m}": ["board.cache_hierarchy.memory_controllers{m}"],
+    "dram{m}": ["board.memory.mem_ctrl{m}"],
+    "dma": ["board.cache_hierarchy.dma_controllers"],
+    "ruby": ["board.cache_hierarchy.ruby_system"]
+  },
+  "keep_suffix": true,
+  "unmapped": "keep"
+}

@@ -1,0 +1,66 @@
+{
+  "type": "Root", "cxx_class": "gem5::Root", "name": null, "path": "root",
+  "full_system": true,
+  "board": {
+    "type": "ArmSystem", "cxx_class": "gem5::ArmSystem", "name": "board", "path": "board",
+    "cache_line_size": 64,
+    "mem_ranges": [],
+    "processor": {
+      "type": "SimpleProcessor", "cxx_class": "gem5::SubSystem", "name": "processor", "path": "board.processor",
+      "cores": [
+        {
+          "type": "SimpleCore", "cxx_class": "gem5::SubSystem", "name": "cores0", "path": "board.processor.cores0",
+          "core": {
+            "type": "ArmO3CPU", "cxx_class": "gem5::o3::CPU", "name": "core", "path": "board.processor.cores0.core",
+            "numThreads": 1,
+            "branchPred": {
+              "type": "TournamentBP", "cxx_class": "gem5::branch_prediction::TournamentBP", "name": "branchPred",
+              "path": "board.processor.cores0.core.branchPred"
+            }
+          }
+        }
+      ]
+    },
+    "cache_hierarchy": {
+      "type": "CMN", "cxx_class": "gem5::SubSystem", "name": "cache_hierarchy", "path": "board.cache_hierarchy",
+      "core_tiles": [
+        {
+          "type": "CoreTile", "cxx_class": "gem5::SubSystem", "name": "core_tiles0", "path": "board.cache_hierarchy.core_tiles0",
+          "core_clusters": [
+            {
+              "type": "CoreCluster", "cxx_class": "gem5::SubSystem", "name": "core_clusters0",
+              "path": "board.cache_hierarchy.core_tiles0.core_clusters0",
+              "dcache": {
+                "type": "CHI_Cache_Controller", "cxx_class": "gem5::ruby::CHI::Cache_Controller", "name": "dcache",
+                "path": "board.cache_hierarchy.core_tiles0.core_clusters0.dcache",
+                "version": 0,
+                "cache": {
+                  "type": "RubyCache", "cxx_class": "gem5::ruby::CacheMemory", "name": "cache",
+                  "path": "board.cache_hierarchy.core_tiles0.core_clusters0.dcache.cache",
+                  "size": "64KiB"
+                }
+              },
+              "l2cache": {
+                "type": "CHI_Cache_Controller", "cxx_class": "gem5::ruby::CHI::Cache_Controller", "name": "l2cache",
+                "path": "board.cache_hierarchy.core_tiles0.core_clusters0.l2cache",
+                "version": 1
+              }
+            }
+          ]
+        }
+      ],
+      "ruby_system": {
+        "type": "RubySystem", "cxx_class": "gem5::ruby::RubySystem", "name": "ruby_system",
+        "path": "board.cache_hierarchy.ruby_system"
+      }
+    },
+    "memory": {
+      "type": "ChanneledMemory", "cxx_class": "gem5::SubSystem", "name": "memory", "path": "board.memory",
+      "mem_ctrl": [
+        {
+          "type": "MemCtrl", "cxx_class": "gem5::memory::MemCtrl", "name": "mem_ctrl0", "path": "board.memory.mem_ctrl0"
+        }
+      ]
+    }
+  }
+}

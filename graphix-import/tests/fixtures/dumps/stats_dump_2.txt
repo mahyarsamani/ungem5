@@ -1,0 +1,3 @@
+---------- Begin Simulation Statistics ----------
+simTicks 2 # ticks (Tick)
+---------- End Simulation Statistics   ----------

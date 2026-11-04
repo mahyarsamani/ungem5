@@ -1,0 +1,36 @@
+
+---------- Begin Simulation Statistics ----------
+simTicks                                         1000                       # Number of ticks simulated (Tick)
+finalTick                                        1000                       # Number of ticks from beginning of simulation (Tick)
+---------- End Simulation Statistics   ----------
+
+---------- Begin Simulation Statistics ----------
+simSeconds                                   0.000854                       # Number of seconds simulated (Second)
+hostTickRate                                 15955463                       # The number of ticks simulated per host second (ticks/s) ((Tick/Second))
+board.processor.cores0.core.numCycles            5000                       # Number of cpu cycles simulated (Cycle)
+board.processor.cores0.core.commit.numCommittedDist::samples          100                       # Number of insts commited each cycle (Count)
+board.processor.cores0.core.commit.numCommittedDist::mean            nan                       # Number of insts commited each cycle (Count)
+board.processor.cores0.core.commit.numCommittedDist::underflows            0      0.00%      0.00% # Number of insts commited each cycle (Count)
+board.processor.cores0.core.commit.numCommittedDist::0           60     60.00%     60.00% # Number of insts commited each cycle (Count)
+board.processor.cores0.core.commit.numCommittedDist::1           40     40.00%    100.00% # Number of insts commited each cycle (Count)
+board.processor.cores0.core.commit.numCommittedDist::total          100                       # Number of insts commited each cycle (Count)
+board.processor.cores0.core.statFuBusy::IntAlu           3     75.00%     75.00% # attempts to use FU when none available (Count)
+board.processor.cores0.core.statFuBusy::MemRead           1     25.00%    100.00% # attempts to use FU when none available (Count)
+board.processor.cores0.core.branchPred.lookups_0::NoBranch           10     50.00%     50.00% # Number of BP lookups (Count)
+board.processor.cores0.core.branchPred.lookups_0::Return           10     50.00%    100.00% # Number of BP lookups (Count)
+board.processor.cores0.core.branchPred.lookups_0::total           20                       # Number of BP lookups (Count)
+board.processor.cores0.core.delta                   -2.500000                       # A negative value (Count)
+board.cache_hierarchy.core_tiles0.core_clusters0.dcache.avg_size     4.749266                       # Avg. number of slots allocated (Unspecified)
+board.cache_hierarchy.core_tiles0.core_clusters0.dcache.avg_size     0.873239                       # Avg. number of slots allocated (Unspecified)
+board.cache_hierarchy.core_tiles0.core_clusters0.dcache.outTransLatHist.SendEvict::bucket_size          512                       (Unspecified)
+board.cache_hierarchy.core_tiles0.core_clusters0.dcache.outTransLatHist.SendEvict::max_bucket         2559                       (Unspecified)
+board.cache_hierarchy.core_tiles0.core_clusters0.dcache.outTransLatHist.SendEvict |      216152     99.99%     99.99% |          12      0.01%    100.00% |           2      0.00%    100.00% |           0      0.00%    100.00% |           0      0.00%    100.00% (Unspecified)
+board.cache_hierarchy.core_tiles0.core_clusters0.dcache.outTransLatHist.SendEvict.retries         7440                       (Unspecified)
+board.cache_hierarchy.ruby_system.Cache_Controller.Load |          10     50.00%     50.00% |          10     50.00%    100.00% (Unspecified)
+board.cache_hierarchy.ruby_system.Cache_Controller.Load::total           20                       (Unspecified)
+board.cache_hierarchy.ruby_system.m_outstandReqHistSeqr |712623289462     56.44%     56.44% |437977020129     34.69%     91.12% |           0      0.00%    100.00% (Unspecified)
+board.cache_hierarchy.core_tiles0.core_clusters0.dcache.cache.usefulBytes.zone_field::0-1         5     50.00%     50.00% # Number of useful bytes (Byte)
+board.cache_hierarchy.core_tiles0.core_clusters0.dcache.cache.usefulBytes.zone_field::2-3         5     50.00%    100.00% # Number of useful bytes (Byte)
+board.cache_hierarchy.core_tiles0.core_clusters0.dcache.cache.bytesTransferred[prefetch][Cache_2]       229888                       # Number of bytes transferred (Count)
+board.memory.mem_ctrl0.avgPriority_cache_hierarchy.memory_controllers1::samples      7700167                       (Unspecified)
+---------- End Simulation Statistics   ----------
