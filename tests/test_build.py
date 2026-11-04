@@ -179,7 +179,7 @@ def test_gem5_build_jobs_and_experiments(project):
 
     sweep = gem5Experiment(
         "sweep", paths.project_dir(), outdir=paths.gem5_out_base_dir() / "s",
-        build=main,
+        build=main, bundle=False,
     )
     assert sweep.gem5_path() == main.binary()
     sim = gem5Job(sweep, None, paths.project_dir() / "run.py", 4)

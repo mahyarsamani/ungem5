@@ -233,6 +233,10 @@ def build_parser() -> tuple[ConsoleParser, dict[str, ConsoleParser]]:
     )
     _arg(p, "job", completer="job")
 
+    p = add("files", "List the files a finished job left in its outdir.")
+    _arg(p, "job", completer="job")
+    _arg(p, "--match", help="Only paths matching this glob, like '*.txt'.")
+
     p = add("resume", "Let paused jobs go on.")
     _arg(p, "jobs", nargs="+", completer="job")
 
@@ -982,6 +986,8 @@ class Console:
                 memory=args.memory,
                 clear=args.clear,
             )
+        elif canonical == "files":
+            self._execute("files", job=args.job, match=args.match)
         elif canonical == "memory":
             self._execute("memory", job=args.job)
         elif canonical == "stop":

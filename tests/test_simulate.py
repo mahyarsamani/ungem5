@@ -102,10 +102,13 @@ def test_missing_binary_names_the_host(project, runs):
 
 def make_job(project, *args, **kwargs):
     paths = project.path_config()
+    # NOTE: Unbundled: the command names the script where it is. Bundled
+    # jobs are tested in test_bundle.py.
     experiment = gem5Experiment(
         "sweep", paths.project_dir(),
         paths.gem5_binary_base_dir() / "main" / "gem5.fast",
         paths.gem5_out_base_dir() / "sweep",
+        bundle=False,
     )
     script = paths.project_dir() / "run.py"
     return experiment, script, gem5Job(experiment, None, script, *args, **kwargs)
@@ -168,7 +171,7 @@ def test_job_with_missing_binary_fails_clearly(project, importable):
     paths = project.path_config()
     experiment = gem5Experiment(
         "x", paths.project_dir(), paths.gem5_binary_base_dir() / "nope",
-        paths.gem5_out_base_dir() / "x",
+        paths.gem5_out_base_dir() / "x", bundle=False,
     )
     job = gem5Job(experiment, None, paths.project_dir() / "run.py")
     launch(job)

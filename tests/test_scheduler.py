@@ -26,8 +26,11 @@ class FakeRoot:
         self.status: dict[str, str] = {}
         self.signals: list[tuple[str, int]] = []
         self.fail_launch: set[str] = set()
-        # NOTE: Who each launch was for.
+        # NOTE: Who each launch was for, and with what bundle.
         self.users: list[str | None] = []
+        self.launched_bundles: list[tuple | None] = []
+        # NOTE: Bundles the worker has, by id.
+        self.bundles: dict[str, bytes] = {}
         # NOTE: outdir -> (job id, status) of a run that ended there.
         self.finished: dict[str, tuple] = {}
         # NOTE: outdir -> whether it's frozen; user -> memory cap.
@@ -51,9 +54,24 @@ class FakeRoot:
     def memory_trace(self, user, outdir):
         return b""
 
-    def launch_job(self, job_id, user, cwd, command, outdir, files, dumps):
+    def has_bundle(self, user, bundle_id):
+        self._check()
+        return bundle_id in self.bundles
+
+    def put_bundle(self, user, bundle_id, data):
+        self._check()
+        self.bundles[bundle_id] = data
+
+    def job_index(self, user, outdir):
+        self._check()
+        return "null"
+
+    def launch_job(
+        self, job_id, user, cwd, command, outdir, files, dumps, bundle
+    ):
         self._check()
         self.users.append(user)
+        self.launched_bundles.append(bundle)
         if job_id in self.fail_launch:
             raise RemoteError("could not launch")
         self.status[outdir] = "running"

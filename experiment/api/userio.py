@@ -9,20 +9,26 @@ line on stdin and answers with one JSON line on stdout.
 """
 
 import base64
+import hashlib
 import json
 import os
 import pwd
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 
 from pathlib import Path
 
 import psutil
 
+from . import bundle
 from .runner import (
     EXIT_FILE,
     FILES_FILE,
+    INDEX_FILE,
     JOB_DIR,
     LAUNCH_FILE,
     MEMORY_FILE,
@@ -141,7 +147,9 @@ def prepare(outdir: str, cwd: str, files: list, dumps: list) -> None:
     job_dir.mkdir(parents=True, exist_ok=True)
     if resolve_status(out)[0] == "running":
         raise RuntimeError(f"a job is already running in {out}")
-    for name in (LAUNCH_FILE, EXIT_FILE, MEMORY_FILE, MEMORY_TRACE_FILE):
+    for name in (
+        LAUNCH_FILE, EXIT_FILE, MEMORY_FILE, MEMORY_TRACE_FILE, INDEX_FILE
+    ):
         (job_dir / name).unlink(missing_ok=True)
 
     allowed = {}
@@ -184,11 +192,16 @@ def finished_runs(outdirs: list) -> list:
 
 
 def read_file(outdir: str, label: str, offset: int, length: int) -> bytes:
+    """A labelled file of the job (files.json), or any file of its
+    outdir's index, by its path relative to the outdir."""
     out = Path(outdir)
     allowed = read_json(_job_dir(out) / FILES_FILE) or {}
-    if label not in allowed:
+    if label in allowed:
+        path = Path(allowed[label])
+    elif label in ((read_json(_job_dir(out) / INDEX_FILE) or {}).get("files") or {}):
+        path = out / label
+    else:
         raise PermissionError(f"{label} is not a file of this job")
-    path = Path(allowed[label])
     if not _inside(path, out):
         raise PermissionError(f"{path} is outside {out}")
     try:
@@ -216,6 +229,90 @@ def memory_trace(outdir: str) -> bytes:
     return data
 
 
+def job_index(outdir: str) -> dict | None:
+    """The index the runner wrote when the job ended, or None."""
+    return read_json(_job_dir(Path(outdir)) / INDEX_FILE)
+
+
+# ---- The store: bundles and working directories ------------------------------
+#
+# A store is one user's, on one host: <base>/<hostname>/<user>, so workers
+# sharing a filesystem never write each other's. blobs/<id>.tar.gz are the
+# bundles as they arrived; work/<key> are working directories, one per
+# bundle and set of data paths, which jobs run in and never change.
+
+
+def has_bundle(store: str, bundle_id: str) -> bool:
+    return (Path(store) / "blobs" / f"{_checked(bundle_id)}.tar.gz").is_file()
+
+
+def put_bundle(store: str, bundle_id: str, data: bytes) -> None:
+    """Keep a packed bundle, once it unpacks to what its id says."""
+    blobs = Path(store) / "blobs"
+    blobs.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=blobs) as scratch:
+        bundle.unpack(data, _checked(bundle_id), Path(scratch) / "check")
+        tmp = Path(scratch) / "blob"
+        tmp.write_bytes(data)
+        os.replace(tmp, blobs / f"{bundle_id}.tar.gz")
+
+
+def _checked(bundle_id: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{64}", bundle_id):
+        raise ValueError(f"{bundle_id!r} is not a bundle id")
+    return bundle_id
+
+
+def _link(work: Path, root: Path, relative: str, bundled: set[str]) -> None:
+    """Make `relative` in `work` show `root`'s: a symlink, or, where
+    bundled files sit inside it, a directory of links to its other
+    entries."""
+    target, source = work / relative, root / relative
+    inside = any(Path(name).is_relative_to(relative) for name in bundled)
+    if not inside:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.is_symlink() and not target.exists():
+            target.symlink_to(source)
+        return
+    if not source.is_dir():
+        return
+    target.mkdir(parents=True, exist_ok=True)
+    for child in sorted(source.iterdir()):
+        name = str(Path(relative) / child.name)
+        if name not in bundled:
+            _link(work, root, name, bundled)
+
+
+def workdir(store: str, bundle_id: str, root: str, data: list) -> str:
+    """The working directory for a bundle with these data paths (under
+    `root`, on a filesystem this host sees), made once."""
+    blob = Path(store) / "blobs" / f"{_checked(bundle_id)}.tar.gz"
+    if not blob.is_file():
+        raise FileNotFoundError(f"bundle {bundle_id[:12]} is not on this host")
+    key = hashlib.sha256(
+        json.dumps([bundle_id, root, sorted(data)]).encode()
+    ).hexdigest()
+    work = Path(store) / "work" / key
+    if work.is_dir():
+        return str(work)
+    work.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix=f".{key[:12]}-", dir=work.parent))
+    try:
+        names = bundle.unpack(blob.read_bytes(), bundle_id, tmp)
+        for relative in sorted(data):
+            _link(tmp, Path(root), relative, set(names))
+        try:
+            os.rename(tmp, work)
+        except OSError:
+            # NOTE: Another launch made it first; theirs is the same.
+            if not work.is_dir():
+                raise
+    finally:
+        if tmp.exists():
+            shutil.rmtree(tmp)
+    return str(work)
+
+
 OPERATIONS = {
     function.__name__: function
     for function in (
@@ -225,6 +322,10 @@ OPERATIONS = {
         finished_runs,
         read_file,
         memory_trace,
+        job_index,
+        has_bundle,
+        put_bundle,
+        workdir,
     )
 }
 
@@ -295,7 +396,8 @@ class HelperIO:
         )
 
     def call(self, name: str, *args):
-        request = (json.dumps({"op": name, "args": list(args)}) + "\n").encode()
+        request = json.dumps({"op": name, "args": [_encode(a) for a in args]})
+        request = (request + "\n").encode()
         with self._lock:
             # NOTE: One retry, with a new helper if the old one died.
             for attempt in range(2):
@@ -336,7 +438,8 @@ def serve(stdin=sys.stdin.buffer, stdout=sys.stdout.buffer) -> None:
     for line in stdin:
         try:
             request = json.loads(line)
-            result = _encode(OPERATIONS[request["op"]](*request["args"]))
+            args = [_decode(arg) for arg in request["args"]]
+            result = _encode(OPERATIONS[request["op"]](*args))
             reply = {"result": result}
         except Exception as e:
             reply = {"error": str(e), "type": type(e).__name__}

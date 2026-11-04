@@ -296,7 +296,10 @@ def as_root(tmp_path, monkeypatch):
 def test_a_root_worker_runs_jobs_as_their_owner_in_a_unit(tmp_path, as_root):
     with pytest.raises(ValueError, match="groups"):
         Worker()
-    worker = Worker(allow_gids=[os.getgid()])
+    store = tmp_path / "store"
+    with pytest.raises(ValueError, match="store"):
+        Worker(allow_gids=[os.getgid()])
+    worker = Worker(allow_gids=[os.getgid()], store=store)
     outdir = tmp_path / "job"
     worker.exposed_launch_job(
         "j", ME, str(tmp_path), "sleep 0.5", str(outdir), (), ()
@@ -311,11 +314,13 @@ def test_a_root_worker_runs_jobs_as_their_owner_in_a_unit(tmp_path, as_root):
 
     # NOTE: Owners outside the group, or system accounts, are refused.
     with pytest.raises(PermissionError, match="not in group"):
-        Worker(allow_gids=[-5]).exposed_launch_job(
+        Worker(allow_gids=[-5], store=store).exposed_launch_job(
             "j", ME, str(tmp_path), "true", str(outdir), (), ()
         )
     with pytest.raises(PermissionError, match="may not run jobs"):
-        Worker(allow_gids=[os.getgid()], min_uid=os.getuid() + 1)._account(ME)
+        Worker(
+            allow_gids=[os.getgid()], min_uid=os.getuid() + 1, store=store
+        )._account(ME)
 
 
 def test_signals_go_only_to_the_owners_processes(tmp_path):

@@ -95,7 +95,10 @@ def _process_work_args(known_args, unknown_args) -> int:
         authenticator = pki.RoleAuthenticator(cert, key, ca, pki.SCHEDULER)
 
     try:
-        worker = Worker(allow_gids, min_uid)
+        # NOTE: The configured store is the root worker's; a user's
+        # worker keeps its store in the user's cache directory.
+        store = Path(config["store"]) if settings.is_root() else None
+        worker = Worker(allow_gids, min_uid, store)
     except ValueError as e:
         error(f"{e}; set [worker] allow_gids or pass --allow-gid.")
         return 2

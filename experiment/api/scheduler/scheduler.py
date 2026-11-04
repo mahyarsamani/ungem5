@@ -16,10 +16,13 @@ change only their own, and only admins change hosts, partitions and the
 scheduler itself. Jobs run as the user who loaded them.
 """
 
+import base64
 import hashlib
 import logging
 import os
 import pwd
+import tarfile
+import tempfile
 import threading
 import time
 
@@ -27,10 +30,12 @@ from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
+from fnmatch import fnmatch
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Iterable
 
+from ..bundle import BundleError, unpack
 from ..host import (
     SIGNAL,
     Host,
@@ -46,6 +51,9 @@ from .state import StateStore
 # NOTE: What a job nobody knows anything about may use.
 DEFAULT_MEMORY = 8 << 30
 MEMORY_HISTORY_FILE = "memory.sqlite"
+BLOB_DIR = "blobs"
+# NOTE: How many of a job's files `files` lists.
+FILES_SHOWN = 50
 # NOTE: How far past their partition users may go, as a share of it, taken
 # only from other users' idle partitions.
 BORROW_MARGIN = 0.1
@@ -234,6 +242,10 @@ class Scheduler:
         self._unchecked: set[str] = set()
         # NOTE: The least memory a job's next runs reserve, set by `retry`.
         self._memory_floors: dict[str, int] = dict()
+        # NOTE: Packed bundles by id: files next to the state, or in memory
+        # without a store (tests).
+        self._blob_dir = store.directory() / BLOB_DIR if store else None
+        self._blobs: dict[str, bytes] = dict()
         # NOTE: Per host, the resources report the low-memory check last
         # acted on, so it acts once per report.
         self._low_memory_seen: dict[str, float] = dict()
@@ -261,6 +273,7 @@ class Scheduler:
             "capacity": self._cmd_capacity,
             "partition": self._cmd_partition,
             "memory": self._cmd_memory,
+            "files": self._cmd_files,
             "signal": self._cmd_signal,
             "resume": self._cmd_resume,
             "retry": self._cmd_retry,
@@ -1200,6 +1213,7 @@ class Scheduler:
         # knows to ask this host about the job instead of launching it again.
         self._persist(force=True)
         try:
+            self._ship(host, job)
             host.launch(job)
         except JobError as e:
             job.set_status(JobStatus.FAILED, message=f"launch failed: {e}")
@@ -1574,6 +1588,10 @@ class Scheduler:
         """Add what a compiled script defines (see `script.compile_script`).
         With `merge` (reload), jobs already known take their new
         definition unless they are running. `compiled` is namespaced."""
+        for bundle_id, packed in compiled["blobs"].items():
+            self._keep_blob(bundle_id, base64.b64decode(packed))
+        # NOTE: The blobs are kept as files; the state keeps only their ids.
+        compiled = dict(compiled, blobs={})
         origin, owner = compiled["script"], compiled["owner"]
         new_hosts = [
             spec["name"]
@@ -1700,6 +1718,45 @@ class Scheduler:
         self._compiled[origin] = compiled
         self._dirty = True
         return lines
+
+    def _keep_blob(self, bundle_id: str, data: bytes) -> None:
+        """Keep a packed bundle, once it unpacks to what its id says: ids
+        are shared by every user, so a forged one must never get in."""
+        if self._blob(bundle_id) is not None:
+            return
+        with tempfile.TemporaryDirectory() as scratch:
+            try:
+                unpack(data, bundle_id, Path(scratch))
+            except (BundleError, OSError, EOFError, tarfile.TarError) as e:
+                raise CommandError(f"bundle {bundle_id[:12]}: {e}")
+        if self._blob_dir is None:
+            self._blobs[bundle_id] = data
+            return
+        self._blob_dir.mkdir(exist_ok=True)
+        tmp = self._blob_dir / f".{bundle_id}.tmp"
+        tmp.write_bytes(data)
+        os.replace(tmp, self._blob_dir / f"{bundle_id}.tar.gz")
+
+    def _blob(self, bundle_id: str) -> bytes | None:
+        if self._blob_dir is None:
+            return self._blobs.get(bundle_id)
+        try:
+            return (self._blob_dir / f"{bundle_id}.tar.gz").read_bytes()
+        except FileNotFoundError:
+            return None
+
+    def _ship(self, host: Host, job: Job) -> None:
+        """Give `host` the job's bundle, unless it has it."""
+        spec = job.bundle_spec()
+        if spec is None or host.has_bundle(job, spec["id"]):
+            return
+        data = self._blob(spec["id"])
+        if data is None:
+            raise JobError(
+                f"bundle {spec['id'][:12]} is gone from the scheduler; "
+                "reload the job's script"
+            )
+        host.put_bundle(job, spec["id"], data)
 
     def _cmd_load(self, compiled: dict) -> list[str]:
         """Load what the console compiled, as the caller's."""
@@ -1904,6 +1961,37 @@ class Scheduler:
                 f"{run['co_jobs'] if run['co_jobs'] is not None else '?'} "
                 "other job(s) on the host"
             )
+        return lines
+
+    def _cmd_files(self, job: str, match: str | None = None) -> list[str]:
+        """The files a finished job left in its outdir, from the index its
+        host keeps; only its owner and admins see them."""
+        target = self._resolve_job(job)
+        if not self.may_read(self._caller, target.id()):
+            raise CommandError(
+                f"only the owner of {target.id()[:12]} and admins see its files"
+            )
+        host = self._hosts.get(target.host() or "")
+        if host is None or not host.up():
+            raise CommandError(f"{target.id()[:12]}: its host is not connected")
+        try:
+            index = host.job_index(target)
+        except (HostUnreachable, JobError) as e:
+            raise CommandError(f"{target.id()[:12]}: {e}")
+        if index is None:
+            return [f"{target.id()[:12]}: no index yet (it hasn't ended)"]
+        files = index["files"]
+        shown = sorted(
+            name for name in files if match is None or fnmatch(name, match)
+        )
+        lines = [
+            f"{target.id()[:12]}: {len(files)} file(s), "
+            f"{format_size(sum(entry[0] for entry in files.values()))}"
+        ]
+        for name in shown[:FILES_SHOWN]:
+            lines.append(f"  {format_size(files[name][0]):>8}  {name}")
+        if len(shown) > FILES_SHOWN:
+            lines.append(f"  ... {len(shown) - FILES_SHOWN} more (use --match)")
         return lines
 
     def _cmd_signal(self, jobs: list[str], signal: str) -> list[str]:

@@ -5,12 +5,13 @@ import subprocess
 import time
 
 from argparse import Namespace
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from enum import Enum
 from hashlib import sha256
 from pathlib import Path
 from typing import List, Optional
 
+from ..api.bundle import Bundle, discover
 from ..api.resources import Resources
 from ..api.runner import JOB_DIR
 from ..api.simulate import RunSpec
@@ -341,12 +342,30 @@ class gem5Job(Job):
             ]
         )
         outdir = experiment.outdir() / id
+        found = experiment.bundle_for(run_script_path)
+        if found is not None:
+            # NOTE: Arguments that name paths in the project are data too;
+            # the job runs in the bundle's directory, with the script at
+            # its path relative to the root.
+            root = experiment.cwd()
+            extra = set()
+            for value in (*args, *kwargs.values()):
+                if isinstance(value, (str, Path)) and not Path(value).is_absolute():
+                    path = root / value
+                    if path.exists() and path.resolve().is_relative_to(root):
+                        extra.add(str(path.resolve().relative_to(root)))
+            found = replace(found, data=sorted(set(found.data) | extra))
+            script = run_script_path
+            script = (script if script.is_absolute() else root / script).resolve()
+            script, cwd = str(script.relative_to(root)), None
+        else:
+            script, cwd = str(run_script_path), str(experiment.cwd())
         self._run_spec = RunSpec(
             binary=str(experiment.gem5_path()),
-            script=str(run_script_path),
+            script=script,
             script_args=gem5Job._cli_args(args, kwargs, shorten=False),
             outdir=str(outdir),
-            cwd=str(experiment.cwd()),
+            cwd=cwd,
         )
         spec_path = outdir / JOB_DIR / "run.json"
         super().__init__(
@@ -382,6 +401,7 @@ class gem5Job(Job):
         self._kwargs = kwargs
         self._gem5_path = experiment.gem5_path()
         self._build = experiment.build()
+        self._bundle = found
         if self._build is not None:
             self.depends_on(self._build)
 
@@ -424,6 +444,8 @@ class gem5Job(Job):
             "build": build,
             "script": str(self._run_script_path),
             "script_content": _file_digest(self._script_path()),
+            # NOTE: All the Python the job runs, not just its script.
+            "bundle": self._bundle.id if self._bundle is not None else None,
             "args": [str(arg) for arg in self._args],
             "kwargs": {key: str(value) for key, value in self._kwargs.items()},
             "inputs": inputs,
@@ -515,10 +537,18 @@ class gem5Experiment(Experiment):
         gem5_path: Path | None = None,
         outdir: Path | None = None,
         build: gem5Build | None = None,
+        bundle: bool = True,
+        extra_files: list[Path] = (),
     ):
         """
         :param build: a gem5Build; every job of this experiment then
             depends on it and runs its binary (`gem5_path` is not needed).
+        :param bundle: ship each job's Python (its run script and the
+            project files it imports; see experiment.api.bundle) to its
+            host, frozen at load, instead of running the files in `cwd`.
+            `cwd` is the project root the bundle is relative to.
+        :param extra_files: files to bundle that imports don't show, e.g.
+            modules loaded with importlib.
         """
         if outdir is None:
             raise ValueError(f"gem5Experiment {name}: outdir is required")
@@ -530,6 +560,21 @@ class gem5Experiment(Experiment):
         self._gem5_path = Path(
             gem5_path if gem5_path is not None else build.binary()
         ).resolve()
+        self._bundle = bundle
+        self._extra_files = [Path(path) for path in extra_files]
+        self._bundles: dict[Path, Bundle] = {}
+
+    def bundle_for(self, run_script_path: Path) -> Bundle | None:
+        """The bundle of a run script, found once per script."""
+        if not self._bundle:
+            return None
+        script = Path(run_script_path)
+        script = (script if script.is_absolute() else self._cwd / script).resolve()
+        if script not in self._bundles:
+            self._bundles[script] = discover(
+                script, self._cwd, self._extra_files
+            )
+        return self._bundles[script]
 
     def cwd(self) -> Path:
         return self._cwd

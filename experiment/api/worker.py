@@ -15,6 +15,7 @@ the groups `allow_gids`. Either way, a job's files are only ever touched as its 
 """
 
 import hashlib
+import json
 import os
 import pwd
 import re
@@ -24,6 +25,7 @@ import sys
 import threading
 import time
 
+from pathlib import Path
 from typing import Iterable
 
 import psutil
@@ -52,6 +54,11 @@ PROTOCOL_CONFIG = {
 }
 
 
+def default_store() -> Path:
+    cache = os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache"
+    return Path(cache) / "experiment" / "store"
+
+
 def unit_name(user: str) -> str:
     """A user name as it appears in systemd unit names; "-" would nest
     slices, so anything but letters, digits and "_" becomes "_"."""
@@ -66,8 +73,16 @@ def _status(result) -> tuple:
 
 class Worker(rpyc.Service):
     def __init__(
-        self, allow_gids: Iterable[int] = (), min_uid: int = DEFAULT_MIN_UID
+        self,
+        allow_gids: Iterable[int] = (),
+        min_uid: int = DEFAULT_MIN_UID,
+        store: Path | None = None,
     ) -> None:
+        """
+        :param store: where bundles and working directories go, under
+            <store>/<hostname>/<user>; by default ~/.cache/experiment/store
+            of the user running the worker.
+        """
         super().__init__()
         self._root = os.geteuid() == 0
         self._allow_gids = frozenset(allow_gids)
@@ -76,6 +91,9 @@ class Worker(rpyc.Service):
                 "a worker run by root needs the groups whose members may run "
                 "jobs"
             )
+        if self._root and store is None:
+            raise ValueError("a worker run by root needs a store directory")
+        self._store = Path(store) if store else default_store()
         self._min_uid = min_uid
         self._user = pwd.getpwuid(os.getuid()).pw_name
         self._local = LocalIO()
@@ -124,6 +142,34 @@ class Worker(rpyc.Service):
                 helper = self._helpers[user] = HelperIO(user)
         return helper
 
+    def _user_store(self, account: pwd.struct_passwd) -> str:
+        """The user's store on this host, made if needed. As root, the
+        host's directory is root's and the user's is theirs, so helpers
+        write only their own user's."""
+        host = self._store / os.uname().nodename
+        store = host / account.pw_name
+        if store.is_dir():
+            return str(store)
+        if not self._root:
+            store.mkdir(parents=True, exist_ok=True)
+            return str(store)
+        host.mkdir(parents=True, exist_ok=True, mode=0o755)
+        store.mkdir(mode=0o700, exist_ok=True)
+        os.chown(store, account.pw_uid, account.pw_gid)
+        return str(store)
+
+    def exposed_has_bundle(self, user: str, bundle_id: str) -> bool:
+        store = self._user_store(self._account(user))
+        return bool(self._io(user).call("has_bundle", store, str(bundle_id)))
+
+    def exposed_put_bundle(self, user: str, bundle_id: str, data: bytes) -> None:
+        store = self._user_store(self._account(user))
+        self._io(user).call("put_bundle", store, str(bundle_id), bytes(data))
+
+    def exposed_job_index(self, user: str, outdir: str) -> str:
+        """The job's outdir index as JSON, or "null" before it ends."""
+        return json.dumps(self._io(user).call("job_index", str(outdir)))
+
     def exposed_ping(self) -> str:
         return os.uname().nodename
 
@@ -146,12 +192,25 @@ class Worker(rpyc.Service):
         outdir: str,
         files: tuple,
         dumps: tuple,
+        bundle: tuple | None = None,
     ) -> int:
-        """Launch the job as `user`; returns its runner's pid."""
+        """Launch the job as `user`; returns its runner's pid. A job with
+        a bundle, (id, root, data paths), runs in the bundle's working
+        directory instead of `cwd`; the bundle must be here already
+        (`put_bundle`)."""
         self._reap()
         account = self._account(user)
         io = self._io(user)
         outdir, job_id = str(outdir), str(job_id)
+        if bundle is not None:
+            bundle_id, root, data = bundle
+            cwd = io.call(
+                "workdir",
+                self._user_store(account),
+                str(bundle_id),
+                str(root),
+                [str(path) for path in tuple(data)],
+            )
         io.call(
             "prepare",
             outdir,

@@ -9,7 +9,9 @@ and start time) and logs to D/.job/runner.log. It runs `<command>` with
 bash, sends its output to D/stdout and D/stderr and, when the command ends,
 atomically writes D/.job/exit.json. These two records let anyone (a
 restarted worker, a restarted scheduler) tell whether the job is running,
-finished, failed, or was killed, without having been its parent.
+finished, failed, or was killed, without having been its parent. Then it
+indexes every file of D in D/.job/index.json (size, mtime, sha256), so
+readers fetch only the files they need.
 
 Signals are delivered to the whole process group by the worker, so the
 runner only notes which signal it received (to tell "killed on request" from
@@ -34,6 +36,7 @@ the kernel tracks exactly even between samples, goes into exit.json.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import resource
@@ -55,6 +58,7 @@ WATCHER_FILE = "watcher"
 WATCHER_CONFIG_FILE = "watcher.json"
 WATCHER_LOG_FILE = "watcher.log"
 RUNNER_LOG_FILE = "runner.log"
+INDEX_FILE = "index.json"
 
 DEFAULT_MEMORY_INTERVAL = 120
 
@@ -223,6 +227,29 @@ class MemoryMeter:
         }
 
 
+def write_index(outdir: Path) -> None:
+    """Index every file of the outdir by its relative path: size, mtime
+    and sha256, so a reader can fetch only what it needs, and only what
+    changed."""
+    files = {}
+    index = outdir / JOB_DIR / INDEX_FILE
+    for path in sorted(outdir.rglob("*")):
+        if path == index or path.is_symlink() or not path.is_file():
+            continue
+        hasher = hashlib.sha256()
+        try:
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    hasher.update(chunk)
+            info = path.stat()
+        except OSError:
+            continue
+        files[str(path.relative_to(outdir))] = [
+            info.st_size, info.st_mtime, hasher.hexdigest()
+        ]
+    write_json_atomic(index, {"made_at": time.time(), "files": files})
+
+
 def kill_tree(child: subprocess.Popen) -> None:
     """TERM the command and everything it started, then KILL what's left."""
     import psutil
@@ -365,6 +392,8 @@ def main(argv: list[str] | None = None) -> int:
             ),
         },
     )
+    # NOTE: After exit.json, so the job's end never waits on hashing.
+    write_index(args.outdir)
     return 0
 
 

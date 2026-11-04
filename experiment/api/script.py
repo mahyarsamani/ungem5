@@ -3,12 +3,14 @@
 A load script is Python that defines Hosts and Experiments. The console
 runs it, as the user, in a fresh interpreter (`python -m
 experiment.api.script`), and sends the scheduler what it defines as data:
-every job's command, files, dumps, features and dependencies, and the
-hosts it may run on. The scheduler never runs a script's code, and a
+every job's command, files, dumps, features and dependencies, the hosts it
+may run on, and the packed bundles of the Python jobs run (`bundle.py`),
+which freezes that code at load. The scheduler never runs a script's code, and a
 fresh interpreter picks up edits to modules the script imports.
 """
 
 import argparse
+import base64
 import hashlib
 import importlib.util
 import json
@@ -21,6 +23,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Iterable
 
+from . import bundle
 from .host import Host
 from .work import Experiment, Job, PerHostJob
 
@@ -140,11 +143,21 @@ def compile_objects(
                 if isinstance(parent, PerHostJob):
                     templates.setdefault(parent.id(), parent)
 
+    # NOTE: Each bundle's packed files, once however many jobs share it.
+    blobs: dict[str, str] = {}
+
+    def with_bundle(job: Job) -> Job:
+        found = job.bundle()
+        if found is not None and found.id not in blobs:
+            blobs[found.id] = base64.b64encode(bundle.pack(found)).decode()
+            warnings.extend(found.warnings)
+        return job
+
     compiled_templates = []
     for template in templates.values():
         instances = []
         for name in _compatible(template, registry.values(), warnings):
-            job = template.instance(name)
+            job = with_bundle(template.instance(name))
             instances.append(job.compile([name]))
         compiled_templates.append(
             {
@@ -164,13 +177,16 @@ def compile_objects(
                 "name": experiment.name(),
                 "outdir": str(experiment.outdir()),
                 "jobs": [
-                    job.compile(_compatible(job, registry.values(), warnings))
+                    with_bundle(job).compile(
+                        _compatible(job, registry.values(), warnings)
+                    )
                     for job in experiment.jobs()
                 ],
             }
             for experiment in experiments
         ],
         "templates": compiled_templates,
+        "blobs": blobs,
         "warnings": warnings,
     }
 

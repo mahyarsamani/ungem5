@@ -299,7 +299,14 @@ class Host:
 
     # NOTE: Every call names the job's owner, whom the worker acts as.
 
+    def has_bundle(self, job: Job, bundle_id: str) -> bool:
+        return bool(self._call("has_bundle", job.owner(), bundle_id))
+
+    def put_bundle(self, job: Job, bundle_id: str, data: bytes) -> None:
+        self._call("put_bundle", job.owner(), bundle_id, data)
+
     def launch(self, job: Job) -> None:
+        spec = job.bundle_spec()
         self._call(
             "launch_job",
             job.id(),
@@ -309,6 +316,18 @@ class Host:
             job.outdir().as_posix(),
             tuple((label, path.as_posix()) for label, path in job.files()),
             tuple((content, path.as_posix()) for _, content, path in job.dumps()),
+            (
+                None
+                if spec is None
+                else (spec["id"], spec["root"], tuple(spec["data"]))
+            ),
+        )
+
+    def job_index(self, job: Job) -> dict | None:
+        """The index of the job's outdir (see `runner.write_index`), or
+        None before the job ends."""
+        return json.loads(
+            self._call("job_index", job.owner(), job.outdir().as_posix())
         )
 
     def statuses(self, jobs: list[Job]) -> list[tuple]:

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Iterable, Sequence, Tuple
 from .resources import Resources
 
 if TYPE_CHECKING:
+    from .bundle import Bundle
     from .host import Host
 
 MEMORY_EXCEED_ACTIONS = ("pause", "kill", "retry")
@@ -133,6 +134,9 @@ class Job:
         self._pinned_host: str | None = None
         # NOTE: The user it runs as; the scheduler sets it on load.
         self._owner: str | None = None
+        # NOTE: The Python it runs, shipped to its host (see bundle.py);
+        # None runs it in `cwd` as it is.
+        self._bundle: "Bundle | None" = None
         self.depends_on(*after)
 
     def depends_on(self, *parents: "Job | PerHostJob") -> "Job":
@@ -166,6 +170,13 @@ class Job:
 
     def pinned_host(self) -> str | None:
         return self._pinned_host
+
+    def bundle(self) -> "Bundle | None":
+        return self._bundle
+
+    def bundle_spec(self) -> dict | None:
+        """The bundle as its host needs it: id, root and data paths."""
+        return self._bundle.spec() if self._bundle is not None else None
 
     def owner(self) -> str | None:
         return self._owner
@@ -281,6 +292,15 @@ class Job:
             {"nice": self.nice, "memory_interval": self.memory_interval}
         )
         dumps = (*self._dumps, ("process", process, job_dir / "process.json"))
+        spec = self.bundle_spec()
+        if spec is not None:
+            dumps += (
+                (
+                    "resources",
+                    json.dumps(spec, indent=1),
+                    job_dir / "resources.json",
+                ),
+            )
         script = self.watcher()
         if script is None:
             return dumps
@@ -497,6 +517,7 @@ class Job:
             ],
             "features": self.features(),
             "memory_group": self.memory_group(),
+            "bundle": self.bundle_spec(),
             "after": after,
             "after_per_host": after_per_host,
             "pinned_host": self._pinned_host,
@@ -556,6 +577,9 @@ class LoadedJob(Job):
 
     def memory_group(self) -> str:
         return self._spec["memory_group"]
+
+    def bundle_spec(self) -> dict | None:
+        return self._spec["bundle"]
 
     def dependency_ids(self) -> tuple[list[str], list[str]]:
         return list(self._spec["after"]), list(self._spec["after_per_host"])
