@@ -139,6 +139,13 @@ class Job:
     def parents(self) -> list["Job | PerHostJob"]:
         return list(self._parents)
 
+    def dependency_ids(self) -> tuple[list[str], list[str]]:
+        """Ids of the jobs and of the per-host jobs this one depends on."""
+        return (
+            [p.id() for p in self._parents if isinstance(p, Job)],
+            [p.id() for p in self._parents if isinstance(p, PerHostJob)],
+        )
+
     def pinned_host(self) -> str | None:
         return self._pinned_host
 
@@ -416,6 +423,36 @@ class Job:
             "outdir": str(self._outdir),
         }
 
+    def compile(self, hosts: Iterable[str]) -> dict:
+        """This job as plain data for the scheduler: what its methods say
+        now. `hosts` are the names of the hosts it is compatible with."""
+        after, after_per_host = self.dependency_ids()
+        return {
+            "id": self._id,
+            "experiment": self._experiment,
+            "cwd": str(self._cwd),
+            "command": self._command,
+            "shorthand_command": self._shorthand_command,
+            "display_command": self.display_command(),
+            "outdir": str(self._outdir),
+            "cores": self.cores(),
+            "memory": self.memory_guess(),
+            "nice": self.nice,
+            "memory_interval": self.memory_interval,
+            "max_retries": self.max_retries,
+            "files": [[label, str(path)] for label, path in self.files()],
+            "dumps": [
+                [label, content, str(path)]
+                for label, content, path in self.dumps()
+            ],
+            "features": self.features(),
+            "memory_group": self.memory_group(),
+            "after": after,
+            "after_per_host": after_per_host,
+            "pinned_host": self._pinned_host,
+            "hosts": sorted(hosts),
+        }
+
     def __str__(self):
         return (
             f"{self.__class__.__name__}(id={self._id[:8]}, "
@@ -424,6 +461,56 @@ class Job:
 
     def __repr__(self):
         return self.__str__()
+
+
+class LoadedJob(Job):
+    """A job as the scheduler holds it: the data `Job.compile` made of it
+    in the console, so the scheduler never runs a script's code."""
+
+    def __init__(self, spec: dict) -> None:
+        # NOTE: Before Job.__init__, which checks nice.
+        self.nice = spec["nice"]
+        self.memory_interval = spec["memory_interval"]
+        self.max_retries = spec["max_retries"]
+        super().__init__(
+            spec["experiment"],
+            Path(spec["cwd"]),
+            spec["command"],
+            spec["shorthand_command"],
+            Path(spec["outdir"]),
+            Resources(spec["cores"], spec["memory"]),
+            spec["id"],
+        )
+        self._spec = spec
+        self._pinned_host = spec["pinned_host"]
+        self._hosts = frozenset(spec["hosts"])
+
+    def spec(self) -> dict:
+        return self._spec
+
+    def display_command(self) -> str:
+        return self._spec["display_command"]
+
+    def files(self) -> Tuple[Tuple[str, Path], ...]:
+        return tuple((label, Path(path)) for label, path in self._spec["files"])
+
+    def dumps(self) -> Tuple[Tuple[str, str, Path], ...]:
+        return tuple(
+            (label, content, Path(path))
+            for label, content, path in self._spec["dumps"]
+        )
+
+    def features(self) -> dict:
+        return self._spec["features"]
+
+    def memory_group(self) -> str:
+        return self._spec["memory_group"]
+
+    def dependency_ids(self) -> tuple[list[str], list[str]]:
+        return list(self._spec["after"]), list(self._spec["after_per_host"])
+
+    def compatible_with_host(self, host: "Host") -> bool:
+        return host.name() in self._hosts
 
 
 class PerHostJob:

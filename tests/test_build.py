@@ -13,7 +13,9 @@ import pytest
 
 import experiment.api.build as build
 from experiment.api.build import Builder, BuildSpec
+from experiment.api.host import Host
 from experiment.api.resources import Resources
+from experiment.api.script import compile_objects
 from experiment.cli.build import _process_build_args, parse_build_args
 from experiment.common.gem5_work import gem5ProjectConfiguration
 
@@ -182,6 +184,15 @@ def test_gem5_build_jobs_and_experiments(project):
     assert sweep.gem5_path() == main.binary()
     sim = gem5Job(sweep, None, paths.project_dir() / "run.py", 4)
     assert sim.parents() == [main]
+    sweep.register_job(sim)
+    host = Host("perle", "x86_64", "perle", insecure=True)
+    compiled = compile_objects("s.py", "", [host], [sweep], [])
+    # NOTE: What the console sends the scheduler is plain JSON.
+    (spec,) = json.loads(json.dumps(compiled))["experiments"][0]["jobs"]
+    assert spec["after_per_host"] == ["build-p-main"]
+    assert spec["features"]["args"] == ["4"]
+    (template,) = compiled["templates"]
+    assert [i["id"] for i in template["instances"]] == ["build-p-main@perle"]
     with pytest.raises(TypeError, match="Resources"):
         gem5Job(sweep, 1, paths.project_dir() / "run.py", 4)
     with pytest.raises(ValueError, match="gem5_path or build"):

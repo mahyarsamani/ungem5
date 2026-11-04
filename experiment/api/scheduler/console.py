@@ -29,6 +29,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 
 from ..host import remote_message
 from ..resources import format_size
+from ..script import ScriptError, compile_in_subprocess
 from ..work import JobStatus
 from ..worker import PROTOCOL_CONFIG
 from .daemon import (
@@ -177,7 +178,8 @@ def build_parser() -> tuple[ConsoleParser, dict[str, ConsoleParser]]:
 
     p = add(
         "reload",
-        "Run a loaded script again; add new experiments and new jobs.",
+        "Run a loaded script again; add new experiments and jobs, and give "
+        "jobs that aren't running their new definition.",
     )
     _arg(p, "script", completer="path", help="Path to the script.")
 
@@ -810,6 +812,22 @@ class Console:
             raise ConsoleError("give job ids or filters (see `help`)")
         return ids
 
+    def _load(self, command: str, script: Path) -> None:
+        """Compile `script` here, as this user, and send the scheduler
+        what it defines."""
+        snapshot = self._client.snapshot(max_age=0)
+        if command == "load" and str(script) in snapshot["info"]["scripts"]:
+            raise ConsoleError(
+                f"{script} is already loaded; use `reload` to pick up changes"
+            )
+        try:
+            compiled = compile_in_subprocess(script, list(snapshot["hosts"]))
+        except ScriptError as e:
+            raise ConsoleError(str(e)) from None
+        for warning in compiled["warnings"]:
+            print(f"warn: {warning}")
+        self._execute(command, compiled=compiled)
+
     def _delete(self, args) -> None:
         if args.script:
             script = Path(args.script).expanduser().resolve()
@@ -865,8 +883,7 @@ class Console:
         if canonical in views:
             views[canonical](args)
         elif canonical in ("load", "reload"):
-            script = Path(args.script).expanduser().resolve()
-            self._execute(canonical, script=str(script))
+            self._load(canonical, Path(args.script).expanduser().resolve())
         elif canonical == "signal":
             ids = self._select(args, f"send {args.signal} to")
             if ids is not None:

@@ -8,7 +8,7 @@ from experiment.api.scheduler.scheduler import CommandError, Scheduler
 from experiment.api.scheduler.state import StateStore
 from experiment.api.work import JobStatus
 
-from test_scheduler import FakeRoot, make_host, run
+from test_scheduler import FakeRoot, load, make_host, run
 
 SCRIPT = """
 from pathlib import Path
@@ -47,11 +47,11 @@ def test_deleted_jobs_stay_deleted_across_reload_and_resume(tmp_path):
     store = StateStore("test")
     scheduler, _ = new_scheduler(store)
     script = write_script(tmp_path, "e", 3)
-    run(scheduler, "load", script=str(script))
+    load(scheduler, script)
     assert run(scheduler, "delete", jobs=["e-0001"])[-1] == "deleted 1 job(s)"
     assert job_ids(scheduler) == ["e-0000", "e-0002"]
 
-    lines = run(scheduler, "reload", script=str(script))
+    lines = load(scheduler, script, "reload")
     assert "1 deleted job(s) skipped" in lines
     assert job_ids(scheduler) == ["e-0000", "e-0002"]
 
@@ -66,7 +66,7 @@ def test_deleted_jobs_stay_deleted_across_reload_and_resume(tmp_path):
 
 def test_running_jobs_are_skipped(tmp_path):
     scheduler, _ = new_scheduler(capacity=1)
-    run(scheduler, "load", script=str(write_script(tmp_path, "e", 2)))
+    load(scheduler, write_script(tmp_path, "e", 2))
     scheduler._tick()
     running = [j for j in scheduler._jobs.values() if j.status().active()]
     assert len(running) == 1
@@ -79,7 +79,7 @@ def test_running_jobs_are_skipped(tmp_path):
 def test_experiment_delete_is_refused_while_running(tmp_path):
     scheduler, root = new_scheduler(capacity=1)
     script = write_script(tmp_path, "e", 2)
-    run(scheduler, "load", script=str(script))
+    load(scheduler, script)
     scheduler._tick()
     with pytest.raises(CommandError, match="still running"):
         run(scheduler, "delete", experiment="e")
@@ -92,9 +92,7 @@ def test_experiment_delete_is_refused_while_running(tmp_path):
         scheduler._tick()
     run(scheduler, "delete", experiment="e")
     assert "e" not in scheduler._experiments and not scheduler._jobs
-    assert "was deleted; skipped" in run(
-        scheduler, "reload", script=str(script)
-    )[0]
+    assert "was deleted; skipped" in load(scheduler, script, "reload")[0]
     run(scheduler, "undelete", experiment="e")
     assert len(scheduler._experiments["e"].jobs()) == 2
 
@@ -104,8 +102,8 @@ def test_deleting_a_script_removes_its_jobs_and_stops_reloading(tmp_path):
     scheduler, _ = new_scheduler(store)
     first = write_script(tmp_path, "a", 2)
     second = write_script(tmp_path, "b", 1)
-    run(scheduler, "load", script=str(first))
-    run(scheduler, "load", script=str(second))
+    load(scheduler, first)
+    load(scheduler, second)
 
     lines = run(scheduler, "delete", script=str(first))
     assert "2 job(s)" in lines[0] and "a" in lines[0]
@@ -119,14 +117,14 @@ def test_deleting_a_script_removes_its_jobs_and_stops_reloading(tmp_path):
     assert job_ids(resumed) == ["b-0000"]
 
     # NOTE: Loading it again is a fresh load, not blocked by the delete.
-    run(resumed, "load", script=str(first))
+    load(resumed, first)
     assert job_ids(resumed) == ["a-0000", "a-0001", "b-0000"]
 
 
 def test_script_delete_is_refused_while_its_jobs_run(tmp_path):
     scheduler, _ = new_scheduler(capacity=1)
     script = write_script(tmp_path, "e", 1)
-    run(scheduler, "load", script=str(script))
+    load(scheduler, script)
     scheduler._tick()
     assert scheduler._jobs["e-0000"].status() == JobStatus.RUNNING
     with pytest.raises(CommandError, match="still running"):

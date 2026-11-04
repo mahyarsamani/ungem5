@@ -4,13 +4,13 @@ Threading model: all scheduler state is owned by the thread running
 `Scheduler.run`. Other threads (the console server, the dashboard) never
 touch it directly; they `submit` commands, which run on the scheduler thread
 between ticks, and read an immutable `Snapshot` published after every tick.
+
+The scheduler never runs a script's code: the console compiles a script to
+data (`script.compile_script`) and loads that.
 """
 
 import hashlib
-import importlib.util
-import json
 import logging
-import sys
 import threading
 import time
 
@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Any, Iterable
+from typing import Iterable
 
 from ..host import (
     SIGNAL,
@@ -31,7 +31,7 @@ from ..host import (
 )
 from ..memory import Estimate, MemoryHistory
 from ..resources import format_size, parse_size
-from ..work import Experiment, Job, JobStatus, PerHostJob
+from ..work import Experiment, Job, JobStatus, LoadedJob, PerHostJob
 from .state import StateStore
 
 # NOTE: What a job nobody knows anything about may use.
@@ -123,46 +123,6 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _load_objects(script: Path) -> tuple[list[Host], list[Experiment]]:
-    """Run `script` and collect the Hosts and Experiments it defines.
-
-    Looks at the script's top-level variables, and inside dicts, lists,
-    tuples and sets they hold.
-    """
-    mod_name = f"_plugin_{hashlib.sha1(str(script).encode()).hexdigest()}"
-    spec = importlib.util.spec_from_file_location(mod_name, str(script))
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load {script}")
-    module = importlib.util.module_from_spec(spec)
-    # NOTE: Let the script import modules that sit next to it.
-    sys.path.insert(0, str(script.parent))
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        sys.path.remove(str(script.parent))
-
-    def walk(obj: Any, seen: set[int]) -> Iterable[Any]:
-        if id(obj) in seen:
-            return
-        seen.add(id(obj))
-        yield obj
-        if isinstance(obj, dict):
-            for value in obj.values():
-                yield from walk(value, seen)
-        elif isinstance(obj, (list, tuple, set, frozenset)):
-            for value in obj:
-                yield from walk(value, seen)
-
-    hosts, experiments, seen = [], [], set()
-    for value in vars(module).values():
-        for obj in walk(value, seen):
-            if isinstance(obj, Host):
-                hosts.append(obj)
-            elif isinstance(obj, Experiment):
-                experiments.append(obj)
-    return hosts, experiments
-
-
 class Scheduler:
     SIGNALS = {signal.name.lower(): signal.value for signal in SIGNAL}
 
@@ -195,15 +155,18 @@ class Scheduler:
         self._experiments: dict[str, Experiment] = dict()
         self._jobs: dict[str, Job] = dict()
         self._killing: set[str] = set()
+        # NOTE: Loaded scripts: their sha256 and what they compiled to.
         self._scripts: dict[str, str] = dict()
+        self._compiled: dict[str, dict] = dict()
         # NOTE: The script that first defined each job, for `delete --script`.
         self._job_origin: dict[str, str] = dict()
         # NOTE: Deleted by the user; loading a script skips them.
         self._deleted_jobs: set[str] = set()
         self._deleted_experiments: set[str] = set()
-        # NOTE: Per-host jobs by id; their instances are ordinary jobs in
-        # self._jobs, with ids PerHostJob.instance_id(template, host).
-        self._templates: dict[str, PerHostJob] = dict()
+        # NOTE: Per-host jobs by id, as {"experiment", "outdir"}; their
+        # instances are ordinary jobs in self._jobs, with ids
+        # PerHostJob.instance_id(template, host).
+        self._templates: dict[str, dict] = dict()
         # NOTE: Each job's dependencies: (plain job ids, per-host job ids).
         self._deps: dict[str, tuple[list[str], list[str]]] = dict()
         # NOTE: Hosts where every per-host dependency of a job is done;
@@ -216,8 +179,6 @@ class Scheduler:
         )
         self._connecting: dict[str, Future] = dict()
         self._reported_errors: dict[str, str | None] = dict()
-        # NOTE: Jobs whose compatible_with_host raised, reported once each.
-        self._bad_compatibility: set[str] = set()
 
         self._commands: Queue[Command] = Queue()
         self._stop = threading.Event()
@@ -728,7 +689,7 @@ class Scheduler:
         for job in experiment.jobs():
             self._forget_job(job)
         for template_id, template in list(self._templates.items()):
-            if template.experiment() == name:
+            if template["experiment"] == name:
                 self._forget_template(template_id)
         self._dirty = True
 
@@ -857,7 +818,9 @@ class Scheduler:
         if job.status() == JobStatus.QUEUED and not any(
             self._placeable(job, host) for host in self._hosts.values()
         ):
-            view["message"] = "no compatible host"
+            view["message"] = (
+                "no compatible host (reload its script after adding hosts)"
+            )
         elif job.status() == JobStatus.QUEUED and self._too_big(job):
             view["message"] = (
                 f"needs {job.cores()} core(s) and "
@@ -871,18 +834,11 @@ class Scheduler:
         view["ready_hosts"] = sorted(ready) if ready is not None else None
         return view
 
-    def _compatible(self, job: Job, host: Host) -> bool:
-        """`job.compatible_with_host(host)`; a raising check means no."""
-        try:
-            return bool(job.compatible_with_host(host))
-        except Exception as e:
-            if job.id() not in self._bad_compatibility:
-                self._bad_compatibility.add(job.id())
-                self._events.error(
-                    f"compatible_with_host of job {job.id()[:8]} raised "
-                    f"{type(e).__name__}: {e}; treating hosts as incompatible."
-                )
-            return False
+    @staticmethod
+    def _compatible(job: Job, host: Host) -> bool:
+        # NOTE: For a LoadedJob, what the console decided when it compiled
+        # the job's script; hosts added since then are incompatible.
+        return job.compatible_with_host(host)
 
     def _launch(self, host: Host, job: Job, memory: int) -> None:
         job.assign(host.name(), memory)
@@ -977,7 +933,11 @@ class Scheduler:
         return {
             "name": self._name,
             "scripts": [
-                {"path": path, "sha256": sha}
+                {
+                    "path": path,
+                    "sha256": sha,
+                    "compiled": self._compiled[path],
+                }
                 for path, sha in self._scripts.items()
             ],
             "hosts": {
@@ -1008,19 +968,27 @@ class Scheduler:
 
         Jobs keep their saved status: only queued jobs are ever launched, so
         jobs that were running are checked with their host, never restarted.
+        Scripts come back as they were compiled; none is run again.
         """
-        # NOTE: Before the scripts run, so they skip what was deleted.
+        # NOTE: Before the scripts load, so they skip what was deleted.
         self._deleted_jobs = set(data.get("deleted_jobs", []))
         self._deleted_experiments = set(data.get("deleted_experiments", []))
         for script in data.get("scripts", []):
             path = Path(script["path"])
             try:
-                if path.exists() and _sha256(path) != script["sha256"]:
-                    self._events.warn(f"{path} changed since it was loaded.")
-                for line in self._load(path, merge=True):
+                changed = path.exists() and _sha256(path) != script["sha256"]
+            except OSError:
+                changed = False
+            if changed:
+                self._events.warn(
+                    f"{path} changed since it was loaded; `reload` it to "
+                    "pick that up."
+                )
+            try:
+                for line in self._load(script["compiled"], merge=True):
                     self._logger.info(line)
             except Exception as e:
-                self._events.error(f"Could not reload {path}: {e}")
+                self._events.error(f"Could not restore {path}: {e}")
 
         for name, saved in data.get("hosts", {}).items():
             spec = saved["spec"]
@@ -1073,81 +1041,52 @@ class Scheduler:
         self._hosts[host.name()] = host
         self._host_mode[host.name()] = HostMode.ACTIVE
         self._dirty = True
-        for template in self._templates.values():
-            self._instantiate(template, host)
-
-    @staticmethod
-    def _dependency_ids(job: Job) -> tuple[list[str], list[str]]:
-        plain = [p.id() for p in job.parents() if isinstance(p, Job)]
-        per_host = [p.id() for p in job.parents() if isinstance(p, PerHostJob)]
-        return plain, per_host
 
     def _record_dependencies(self, job: Job) -> None:
-        self._deps[job.id()] = self._dependency_ids(job)
+        self._deps[job.id()] = job.dependency_ids()
 
-    def _instantiate(self, template: PerHostJob, host: Host) -> None:
-        """Make `template`'s job for `host`, if it runs there."""
-        job_id = PerHostJob.instance_id(template.id(), host.name())
-        if job_id in self._jobs or job_id in self._deleted_jobs:
-            return
-        try:
-            if not template.compatible_with_host(host):
-                return
-        except Exception as e:
-            self._events.error(
-                f"compatible_with_host of {template.id()} raised "
-                f"{type(e).__name__}: {e}; not running it on {host.name()}."
-            )
-            return
-        experiment = self._experiments.get(template.experiment())
-        if experiment is None:
-            experiment = Experiment(template.experiment(), template.outdir())
-            self._experiments[template.experiment()] = experiment
-        job = template.instance(host.name())
+    def _put_job(
+        self, experiment: Experiment, job: LoadedJob, origin: str
+    ) -> str:
+        """Add `job` to `experiment`, or give the known job of its id the
+        new definition, keeping its status, unless it is running. Returns
+        "added", "updated", "same", "running", "deleted" or "duplicate"."""
+        if job.id() in self._deleted_jobs:
+            return "deleted"
+        old = self._jobs.get(job.id())
+        if old is not None:
+            if old.experiment() != experiment.name():
+                return "duplicate"
+            if isinstance(old, LoadedJob) and old.spec() == job.spec():
+                return "same"
+            if old.status().active():
+                return "running"
+            job.restore_runtime_state(old.runtime_state())
+            experiment.remove_job(job.id())
+            self._memory.forget(job.id())
+        else:
+            self._job_origin[job.id()] = origin
         experiment.register_job(job)
         self._jobs[job.id()] = job
-        origin = self._job_origin.get(template.id())
-        if origin is not None:
-            self._job_origin[job.id()] = origin
         self._record_dependencies(job)
         self._dirty = True
+        return "added" if old is None else "updated"
 
-    def _register_template(self, template: PerHostJob, origin: str) -> bool:
-        if template.id() in self._templates:
-            return False
-        if template.experiment() in self._deleted_experiments:
-            return False
-        self._templates[template.id()] = template
-        # NOTE: Templates aren't jobs, but `delete --script` needs to know
-        # which script defined them.
-        self._job_origin[template.id()] = origin
-        for host in self._hosts.values():
-            self._instantiate(template, host)
-        return True
-
-    def _check_dependencies(self, experiments: list[Experiment]) -> None:
+    def _check_dependencies(self, jobs: list[Job]) -> None:
         """Refuse a script whose jobs depend on unknown jobs, or on each
         other in a cycle. Called before anything is loaded."""
-        defined = {
-            job.id(): job
-            for experiment in experiments
-            for job in experiment.jobs()
-        }
+        defined = {job.id(): job for job in jobs}
         for job in defined.values():
-            for parent in job.parents():
-                if (
-                    isinstance(parent, Job)
-                    and parent.id() not in defined
-                    and parent.id() not in self._jobs
-                ):
+            for parent_id in job.dependency_ids()[0]:
+                if parent_id not in defined and parent_id not in self._jobs:
                     raise CommandError(
-                        f"job {job.id()[:12]} depends on {parent.id()[:12]}, "
+                        f"job {job.id()[:12]} depends on {parent_id[:12]}, "
                         "which is neither loaded nor registered in an "
                         "experiment of this script"
                     )
         graph = {job_id: plain for job_id, (plain, _) in self._deps.items()}
         for job_id, job in defined.items():
-            graph.setdefault(job_id, self._dependency_ids(job)[0])
+            graph[job_id] = job.dependency_ids()[0]
         done: set[str] = set()
 
         def visit(job_id: str, path: list[str]) -> None:
@@ -1166,37 +1105,42 @@ class Scheduler:
         for job_id in graph:
             visit(job_id, [])
 
-    def _load(self, script: Path, merge: bool) -> list[str]:
-        script = Path(script).expanduser().resolve()
-        if not script.is_file() or script.suffix != ".py":
-            raise CommandError(f"{script} is not a Python file")
-        hosts, experiments = _load_objects(script)
-        self._check_dependencies(experiments)
-        templates = {
-            template.id(): template
-            for experiment in experiments
-            for template in experiment.per_host_jobs()
-        }
-        for experiment in experiments:
-            for job in experiment.jobs():
-                for parent in job.parents():
-                    if isinstance(parent, PerHostJob):
-                        templates.setdefault(parent.id(), parent)
+    def _load(self, compiled: dict, merge: bool) -> list[str]:
+        """Add what a compiled script defines (see `script.compile_script`).
+        With `merge` (reload), jobs already known take their new
+        definition unless they are running."""
+        origin = compiled["script"]
+        experiments = [
+            (spec, [LoadedJob(job) for job in spec["jobs"]])
+            for spec in compiled["experiments"]
+        ]
+        templates = [
+            (spec, [LoadedJob(job) for job in spec["instances"]])
+            for spec in compiled["templates"]
+        ]
+        self._check_dependencies(
+            [job for _, jobs in experiments + templates for job in jobs]
+        )
         lines = []
-        new_jobs: list[Job] = []
 
-        for host in hosts:
-            if host.name() in self._hosts:
+        added_hosts = 0
+        for spec in compiled["hosts"]:
+            if spec["name"] in self._hosts:
                 if not merge:
-                    lines.append(f"host {host.name()} already added; skipped")
+                    lines.append(f"host {spec['name']} already added; skipped")
                 continue
-            self._add_host(host)
-            lines.append(f"added host {host.name()}")
+            self._add_host(Host.from_spec(spec))
+            lines.append(f"added host {spec['name']}")
+            added_hosts += 1
+        if added_hosts and any(path != origin for path in self._scripts):
+            lines.append(
+                "reload the other loaded scripts so their jobs can run on "
+                "the new host(s)"
+            )
 
-        origin = str(script)
         skipped_deleted = 0
-        for experiment in experiments:
-            name = experiment.name()
+        for spec, jobs in experiments:
+            name = spec["name"]
             if name in self._killing:
                 lines.append(f"experiment {name} is being killed; skipped")
                 continue
@@ -1214,35 +1158,35 @@ class Scheduler:
                 )
                 continue
             if existing is None:
-                existing = Experiment(name, experiment.outdir())
+                existing = Experiment(name, Path(spec["outdir"]))
                 self._experiments[name] = existing
                 lines.append(f"added experiment {name}")
-            added = 0
-            for job in experiment.jobs():
-                if job.id() in self._deleted_jobs:
-                    skipped_deleted += 1
-                    continue
-                owner = self._jobs.get(job.id())
-                if owner is not None:
-                    if owner.experiment() != name:
-                        lines.append(
-                            f"job {job.id()[:8]} in {name} duplicates one in "
-                            f"{owner.experiment()}; skipped"
-                        )
-                    continue
-                existing.register_job(job)
-                self._jobs[job.id()] = job
-                self._job_origin[job.id()] = origin
-                new_jobs.append(job)
-                added += 1
-            defined = {job.id() for job in experiment.jobs()}
+            counts: dict[str, int] = {}
+            for job in jobs:
+                outcome = self._put_job(existing, job, origin)
+                counts[outcome] = counts.get(outcome, 0) + 1
+                if outcome == "duplicate":
+                    lines.append(
+                        f"job {job.id()[:8]} in {name} duplicates one in "
+                        f"{self._jobs[job.id()].experiment()}; skipped"
+                    )
+            skipped_deleted += counts.get("deleted", 0)
+            line = f"{name}: {counts.get('added', 0)} new job(s)"
+            if counts.get("updated"):
+                line += f", {counts['updated']} updated"
+            if counts.get("running"):
+                line += (
+                    f", {counts['running']} running with their old "
+                    "definition"
+                )
+            lines.append(line)
+            defined = {job.id() for job in jobs}
             stale = [
                 job
                 for job in existing.jobs()
                 if job.id() not in defined
                 and self._job_origin.get(job.id()) == origin
             ]
-            lines.append(f"{name}: {added} new job(s)")
             if merge and stale:
                 lines.append(
                     f"{name}: {len(stale)} job(s) are no longer in the script "
@@ -1251,32 +1195,47 @@ class Scheduler:
         if skipped_deleted:
             lines.append(f"{skipped_deleted} deleted job(s) skipped")
 
-        for template in templates.values():
-            if self._register_template(template, origin):
-                count = sum(
-                    1
-                    for host in self._hosts
-                    if PerHostJob.instance_id(template.id(), host) in self._jobs
-                )
+        for spec, jobs in templates:
+            if spec["experiment"] in self._deleted_experiments:
+                continue
+            new = spec["id"] not in self._templates
+            self._templates[spec["id"]] = {
+                "experiment": spec["experiment"],
+                "outdir": spec["outdir"],
+            }
+            # NOTE: Templates aren't jobs, but `delete --script` needs to
+            # know which script defined them.
+            self._job_origin.setdefault(spec["id"], origin)
+            experiment = self._experiments.get(spec["experiment"])
+            if experiment is None:
+                experiment = Experiment(spec["experiment"], Path(spec["outdir"]))
+                self._experiments[spec["experiment"]] = experiment
+            added = sum(
+                self._put_job(experiment, job, origin) == "added"
+                for job in jobs
+            )
+            if new:
                 lines.append(
-                    f"added per-host job {template.id()} ({count} host(s))"
+                    f"added per-host job {spec['id']} ({len(jobs)} host(s))"
                 )
-        for job in new_jobs:
-            self._record_dependencies(job)
+            elif added:
+                lines.append(f"per-host job {spec['id']}: {added} new host(s)")
 
-        self._scripts[origin] = _sha256(script)
+        self._scripts[origin] = compiled["sha256"]
+        self._compiled[origin] = compiled
         self._dirty = True
         return lines
 
-    def _cmd_load(self, script: str) -> list[str]:
-        if str(Path(script).expanduser().resolve()) in self._scripts:
+    def _cmd_load(self, compiled: dict) -> list[str]:
+        if compiled["script"] in self._scripts:
             raise CommandError(
-                f"{script} is already loaded; use `reload` to pick up changes"
+                f"{compiled['script']} is already loaded; use `reload` to "
+                "pick up changes"
             )
-        return self._load(Path(script), merge=False)
+        return self._load(compiled, merge=False)
 
-    def _cmd_reload(self, script: str) -> list[str]:
-        return self._load(Path(script), merge=True)
+    def _cmd_reload(self, compiled: dict) -> list[str]:
+        return self._load(compiled, merge=True)
 
     def _experiment(self, name: str) -> Experiment:
         if name not in self._experiments:
@@ -1538,6 +1497,7 @@ class Scheduler:
             for name in emptied:
                 self._remove_experiment(name)
             del self._scripts[path]
+            del self._compiled[path]
             self._dirty = True
             return [
                 f"deleted script {script}: {len(owned)} job(s)"
@@ -1591,8 +1551,8 @@ class Scheduler:
     def _cmd_undelete(
         self, jobs: list[str] = (), experiment: str | None = None
     ) -> list[str]:
-        """Stop skipping deleted jobs or an experiment, and reload every
-        loaded script so they come back."""
+        """Stop skipping deleted jobs or an experiment, and load every
+        loaded script again, as compiled, so they come back."""
         restored = 0
         if experiment is not None:
             if experiment not in self._deleted_experiments:
@@ -1612,7 +1572,7 @@ class Scheduler:
         lines = []
         for path in list(self._scripts):
             try:
-                lines += self._load(Path(path), merge=True)
+                lines += self._load(self._compiled[path], merge=True)
             except Exception as e:
                 lines.append(f"reloading {path} failed: {e}")
         return lines

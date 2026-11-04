@@ -7,6 +7,7 @@ import pytest
 from experiment.api.host import Host, HostState
 from experiment.api.scheduler.scheduler import CommandError, Scheduler
 from experiment.api.scheduler.state import StateStore
+from experiment.api.script import compile_objects, compile_script
 from experiment.api.work import Experiment, Job, JobStatus
 
 
@@ -118,6 +119,20 @@ def make_scheduler(tmp_path, root, experiments, store=None, capacity=2):
 
 def run(scheduler: Scheduler, name: str, **kwargs):
     return scheduler._handlers[name](**kwargs)
+
+
+def load(scheduler: Scheduler, script: Path, command: str = "load"):
+    """What the console's `load` does, in this process."""
+    compiled = compile_script(script, scheduler._hosts.values())
+    return run(scheduler, command, compiled=compiled)
+
+
+def install(scheduler: Scheduler, *experiments, origin: str = "script.py"):
+    """Load `experiments` as if a script at `origin` defined them."""
+    compiled = compile_objects(
+        origin, "", [], list(experiments), scheduler._hosts.values()
+    )
+    return run(scheduler, "reload", compiled=compiled)
 
 
 def statuses(experiment: Experiment) -> list[str]:
@@ -347,21 +362,25 @@ def test_jobs_only_run_on_compatible_hosts(tmp_path):
     for job in (arm, broken, plain):
         experiment.register_job(job)
     x86_root, arm_root = FakeRoot(), FakeRoot()
-    scheduler, _ = make_scheduler(tmp_path, x86_root, [experiment])
+    scheduler, _ = make_scheduler(tmp_path, x86_root, [])
     arm_host = make_host(arm_root, name="arm-host", isa="aarch64")
     scheduler._add_host(arm_host)
     assert arm_host.connect()
+    # NOTE: Compiling asks each job about each host; a raising check is
+    # a warning and means no.
+    compiled = compile_objects(
+        "s.py", "", [], [experiment], scheduler._hosts.values()
+    )
+    assert any("raised RuntimeError" in w for w in compiled["warnings"])
+    run(scheduler, "load", compiled=compiled)
 
     scheduler._tick()
-    assert arm.host() == "arm-host"
-    assert plain.status() == JobStatus.RUNNING
-    assert broken.status() == JobStatus.QUEUED
+    jobs = scheduler._jobs
+    assert jobs["arm-id"].host() == "arm-host"
+    assert jobs["plain-id"].status() == JobStatus.RUNNING
+    assert jobs["broken-id"].status() == JobStatus.QUEUED
     views = {job["id"]: job for job in scheduler.snapshot().jobs}
-    assert views["broken-id"]["message"] == "no compatible host"
-    assert any(
-        "compatible_with_host" in event[3]
-        for event in scheduler.events().since(0)
-    )
+    assert views["broken-id"]["message"].startswith("no compatible host")
 
 
 def test_start_and_end_times_come_from_the_worker(tmp_path):
