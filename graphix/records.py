@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from .config import ConfigTree
-from .names import split_name
+from .names import FIELD_SEPARATOR, split_name
 from .parse import StatLine
 from .specs import Registry, StatSpec
 
@@ -71,18 +71,31 @@ def build_blocks(
     registry = registry if registry is not None else Registry()
     blocks: Dict[tuple, Block] = {}
     skipped: Counter = Counter()
+    # Most lines repeat a base name with another `::` field (a vector's
+    # elements, a histogram's buckets), so the owner split and the spec
+    # resolution are done once per base name.
+    by_base: Dict[str, tuple] = {}
     for line in lines:
-        stat_name = split_name(line.name, tree)
-        owner_class = (
-            tree[stat_name.owner].cxx_class if tree is not None else None
-        )
-        resolution = registry.resolve(stat_name.owner, owner_class, stat_name.key)
+        base, separator, line_field = line.name.partition(FIELD_SEPARATOR)
+        line_field = line_field if separator else None
+        resolved = by_base.get(base)
+        if resolved is None:
+            stat_name = split_name(base, tree)
+            owner_class = (
+                tree[stat_name.owner].cxx_class if tree is not None else None
+            )
+            resolution = registry.resolve(
+                stat_name.owner, owner_class, stat_name.key
+            )
+            resolved = (stat_name.owner, stat_name.key, owner_class, resolution)
+            by_base[base] = resolved
+        owner, key, owner_class, resolution = resolved
         if resolution.skip:
-            skipped[resolution.spec.doc or stat_name.key] += 1
+            skipped[resolution.spec.doc or key] += 1
             continue
         block_key = (
             resolution.name,
-            stat_name.owner,
+            owner,
             resolution.dims,
             line.occurrence,
         )
@@ -90,20 +103,20 @@ def build_blocks(
         if block is None:
             block = Block(
                 resolution.name,
-                stat_name.owner,
+                owner,
                 owner_class,
                 resolution.dims,
                 line.occurrence,
                 resolution.spec,
             )
             blocks[block_key] = block
-        if stat_name.field in block.fields:
+        if line_field in block.fields:
             raise ValueError(
                 f"line {line.lineno}: '{line.name}' maps onto a block that "
-                f"already has field {stat_name.field!r}; two keys resolve to "
+                f"already has field {line_field!r}; two keys resolve to "
                 f"the same family '{resolution.name}' and dims {resolution.dims}."
             )
-        block.fields[stat_name.field] = line.values
+        block.fields[line_field] = line.values
         block.oneline = block.oneline or line.oneline
         block.unit = block.unit or line.unit
         block.description = block.description or line.description

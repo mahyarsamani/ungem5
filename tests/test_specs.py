@@ -4,8 +4,9 @@ import unittest
 import warnings
 from pathlib import Path
 
+import gxtest  # noqa: E402,F401  (path and a temporary cache)
+
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 
 from graphix import ConfigTree, find_dump_file, read_dump  # noqa: E402
 from graphix.parse import StatLine  # noqa: E402

@@ -12,11 +12,14 @@ Values are printed in fixed notation, or as `nan` or `inf`.
 """
 
 import re
+import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple, Union
 from warnings import warn
+
+from . import cache as _cache
 
 BEGIN_MARKER = "Begin Simulation Statistics"
 END_MARKER = "End Simulation Statistics"
@@ -114,7 +117,9 @@ def dump_locations(run_dir: Union[str, Path]) -> List[Tuple[Path, int]]:
     )
 
 
-def read_dump(path: Union[str, Path], dump: int = -1) -> List[StatLine]:
+def read_dump(
+    path: Union[str, Path], dump: int = -1, cache: bool = True
+) -> List[StatLine]:
     """Parse one dump of a gem5 text stats file.
 
     `dump` selects the dump by position, counting from 0; negative values
@@ -123,8 +128,18 @@ def read_dump(path: Union[str, Path], dump: int = -1) -> List[StatLine]:
     still being written after it (a running simulation) does no harm.
     Duplicated names are kept and numbered by `StatLine.occurrence`;
     one warning per dump lists them.
+    With `cache` (the default), the parsed lines are kept in graphix's cache
+    (`graphix.cache`) and read from it while the file is unchanged.
     """
     path = Path(path)
+    if cache:
+        cached = _cache.load(path, dump)
+        if cached is not None:
+            _warn_duplicates(path, {l.name for l in cached if l.occurrence})
+            return cached
+        parsed = read_dump(path, dump, cache=False)
+        _cache.store(path, dump, parsed)
+        return parsed
     index = dump
     if dump < 0:
         total = count_dumps(path)
@@ -163,14 +178,41 @@ def read_dump(path: Union[str, Path], dump: int = -1) -> List[StatLine]:
             )
         parsed.append(stat_line)
 
-    duplicated = sorted(name for name, count in seen.items() if count > 1)
+    _warn_duplicates(path, {name for name, count in seen.items() if count > 1})
+    return parsed
+
+
+def dump_scalars(
+    path: Union[str, Path], dump: int, names
+) -> dict:
+    """The values of a few root stats (`simTicks`, `finalTick`, ...) of one
+    dump, found by name without parsing the dump's other lines."""
+    path = Path(path)
+    index = dump if dump >= 0 else count_dumps(path) + dump
+    wanted = {f"{name} ": name for name in names}
+    values = {}
+    for position, block in enumerate(_split_dumps(path)):
+        if position != index:
+            continue
+        for _, line in block:
+            for prefix, name in wanted.items():
+                if line.startswith(prefix):
+                    try:
+                        values[name] = float(line.split()[1])
+                    except (IndexError, ValueError):
+                        pass
+        break
+    return values
+
+
+def _warn_duplicates(path: Path, names) -> None:
+    duplicated = sorted(names)
     if duplicated:
         warn(
             f"{path}: {len(duplicated)} stat name(s) appear more than once in "
             f"one dump; they are kept and numbered by 'occurrence'. "
             f"First: {duplicated[0]!r}."
         )
-    return parsed
 
 
 def _split_dumps(path: Path) -> Iterator[List[Tuple[int, str]]]:
@@ -207,6 +249,12 @@ def _parse_line(path: Path, lineno: int, line: str) -> Optional[StatLine]:
     if marker != -1:
         description = text[marker + 3 :].strip() or None
         text = text[:marker].rstrip()
+    # Thousands of lines share a description and a unit: one string each
+    # keeps memory and the cache small.
+    if description is not None:
+        description = sys.intern(description)
+    if unit is not None:
+        unit = sys.intern(unit)
 
     tokens = text.split()
     name = tokens[0]
@@ -245,6 +293,10 @@ def _strip_unit(text: str) -> Tuple[str, Optional[str]]:
     """
     if not text.endswith(")"):
         return text, None
+    # Fast path: a simple unit, `(Count)`, with no parenthesis inside.
+    head, separator, unit = text[:-1].rpartition(" (")
+    if separator and "(" not in unit and ")" not in unit:
+        return head.rstrip(), unit
     depth = 0
     for index in range(len(text) - 1, -1, -1):
         if text[index] == ")":

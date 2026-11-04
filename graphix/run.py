@@ -13,13 +13,15 @@ import glob
 import re
 import warnings
 from collections import Counter, OrderedDict
+from concurrent.futures import ProcessPoolExecutor
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union
 
+from . import cache as _cache
 from .config import ConfigTree
 from .owners import OwnerScheme
-from .parse import dump_locations, find_dump_file, read_dump
+from .parse import StatLine, dump_locations, dump_scalars, find_dump_file, read_dump
 from .records import Block, DumpBlocks, build_blocks, suggest_specs
 from .specs import Registry
 from .stats import KINDS, Index, Stat
@@ -39,25 +41,24 @@ class Run:
         quiet: bool = True,
         dump: Union[int, Tuple[Path, int]] = -1,
         tree: Optional[ConfigTree] = None,
+        cache: bool = True,
+        lines: Optional[List[StatLine]] = None,
     ) -> None:
-        """`dump` picks the dump: an index into `dump_locations(path)` (the
-        default, -1, is the last, as `find_dump_file` finds it) or a
-        location (file, dump in file) from it. `tree` reuses a parsed
-        `config.json` of the same directory."""
+        """`dump` picks the dump: an index into `dumps()` (the default, -1,
+        is the last, as `find_dump_file` finds it) or a location (file, dump
+        in file) from it. `tree` reuses a parsed `config.json` of the same
+        directory; `cache` uses graphix's parsed-dump cache; `lines` are the
+        dump's lines when the caller has read them already."""
         self.path = Path(path)
         self.labels = OrderedDict(labels or {})
         self.labels.setdefault("run", self.path.name)
         self.tree = tree or ConfigTree.from_file(self.path / "config.json")
-        if isinstance(dump, tuple):
-            self.dump_file, self.dump_index = dump
-        elif dump == -1:
-            self.dump_file, self.dump_index = find_dump_file(self.path), -1
-        else:
-            self.dump_file, self.dump_index = dump_locations(self.path)[dump]
-        with warnings.catch_warnings():
-            if quiet:
-                warnings.simplefilter("ignore")
-            lines = read_dump(self.dump_file, self.dump_index)
+        self.dump_file, self.dump_index = _location(self.path, dump)
+        if lines is None:
+            with warnings.catch_warnings():
+                if quiet:
+                    warnings.simplefilter("ignore")
+                lines = read_dump(self.dump_file, self.dump_index, cache=cache)
         # The dump's simulated time, if it has one: a sample's position.
         self.sim_seconds = next(
             (line.values[0] for line in lines if line.name == "simSeconds"),
@@ -75,6 +76,29 @@ class Run:
 
     def names(self) -> List[str]:
         return list(self._by_name)
+
+    def dumps(self) -> List[Tuple[Path, int]]:
+        """Every dump of this run's directory, in order, as (file, dump in
+        file); `Run(path, dump=k)` reads the k-th."""
+        return dump_locations(self.path)
+
+    def resets(self) -> List[int]:
+        """Positions in `dumps()` of dumps that follow a stats reset.
+
+        gem5's `simTicks` counts from the last reset and `finalTick` from
+        the start of the simulation, so a dump whose `simTicks` is smaller
+        than the previous dump's while `finalTick` grew follows a reset.
+        A run with an ROI that resets once and dumps cumulatively after it
+        has none past its first dump, so its last dump covers the whole ROI.
+        """
+        ticks = [_dump_ticks(file, index) for file, index in self.dumps()]
+        return [
+            position
+            for position in range(1, len(ticks))
+            if None not in (ticks[position] + ticks[position - 1])
+            and ticks[position][0] < ticks[position - 1][0]
+            and ticks[position][1] > ticks[position - 1][1]
+        ]
 
     def blocks_named(self, name: str) -> List[Block]:
         return self._by_name.get(name, [])
@@ -111,6 +135,53 @@ class Run:
         """The path of a controller named like gem5's MachineID (`Cache_12`)."""
         machine, _, version = machine_id.rpartition("_")
         return self.controller_path(machine, int(version))
+
+
+def _location(path: Path, dump: Union[int, Tuple[Path, int]]) -> Tuple[Path, int]:
+    """(file, dump in file) for a dump given as a location or a position."""
+    if isinstance(dump, tuple):
+        return dump
+    if dump == -1:
+        return find_dump_file(path), -1
+    return dump_locations(path)[dump]
+
+
+def _dump_ticks(path: Path, dump: int) -> Tuple[Optional[float], Optional[float]]:
+    """(simTicks, finalTick) of one dump, without parsing the rest."""
+    values = dump_scalars(path, dump, ("simTicks", "finalTick"))
+    return values.get("simTicks"), values.get("finalTick")
+
+
+def _read_lines(task: Tuple[Path, int, bool]) -> List[StatLine]:
+    """A process-pool worker: one dump's lines (through the cache)."""
+    path, dump, cache = task
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return read_dump(path, dump, cache=cache)
+
+
+def _read_all(
+    locations: Sequence[Tuple[Path, int]], cache: bool, workers: int
+) -> List[List[StatLine]]:
+    """The lines of many dumps, cache hits read here and misses parsed by
+    `workers` processes (which also fill the cache)."""
+    results: List[Optional[List[StatLine]]] = [None] * len(locations)
+    misses = []
+    for position, (path, dump) in enumerate(locations):
+        cached = _cache.load(path, dump) if cache else None
+        if cached is not None:
+            results[position] = cached
+        else:
+            misses.append(position)
+    tasks = [(locations[p][0], locations[p][1], cache) for p in misses]
+    if workers > 1 and len(tasks) > 1:
+        with ProcessPoolExecutor(min(workers, len(tasks))) as pool:
+            parsed = list(pool.map(_read_lines, tasks))
+    else:
+        parsed = [_read_lines(task) for task in tasks]
+    for position, lines in zip(misses, parsed):
+        results[position] = lines
+    return results
 
 
 def _run_directories(
@@ -157,6 +228,9 @@ class RunSet:
         specs: Sequence = (),
         owners: Optional[OwnerScheme] = None,
         registry: Optional[Registry] = None,
+        dump: int = -1,
+        cache: bool = True,
+        workers: int = 1,
     ) -> "RunSet":
         """Load runs.
 
@@ -166,13 +240,63 @@ class RunSet:
         dict of path -> labels); every run also gets a `run` label, its
         directory name.
         `specs` are user `StatSpec`s, placed before the built-in gem5 specs.
+        `dump` picks each run's dump by position in `Run.dumps()` (default
+        the last); `from_samples` loads them all.
+        `cache` uses graphix's parsed-dump cache (`graphix.cache`), and
+        `workers` > 1 parses the dumps the cache misses in that many
+        processes.
         """
         registry = registry if registry is not None else Registry(specs)
+        directories = _run_directories(paths)
+        locations = [_location(directory, dump) for directory in directories]
+        all_lines = _read_all(locations, cache, workers)
         runs = [
-            Run(directory, _labels_for(labels, directory), registry, owners)
-            for directory in _run_directories(paths)
+            Run(
+                directory,
+                _labels_for(labels, directory),
+                registry,
+                owners,
+                dump=location,
+                lines=lines,
+            )
+            for directory, location, lines in zip(directories, locations, all_lines)
         ]
         return cls(runs)
+
+    @classmethod
+    def from_experiment(
+        cls,
+        experiment_dirs: Union[str, Path, Iterable[Union[str, Path]]],
+        labels: Labels = None,
+        done: Optional[Callable[[Path], bool]] = None,
+        statuses: Iterable[str] = ("done",),
+        **from_dirs_args: Any,
+    ) -> "RunSet":
+        """Load the finished jobs of `tools/experiment` experiments.
+
+        `experiment_dirs` are experiment output directories
+        (`<gem5_out_base_dir>/<experiment>`), one or many.
+        A job is kept when its status (`graphix.sources.helper.job_status`)
+        is in `statuses` (default: exited cleanly with `simulation_finished`)
+        and the project's own `done(job_dir)` holds, when given.
+        Each run is labelled with `experiment` and its `params.json`
+        (`job_labels`), then with `labels` (a function or a dict, as in
+        `from_dirs`), which win on a clash.
+        The other arguments go to `from_dirs`.
+        """
+        from .sources import helper
+
+        jobs = helper.select_jobs(experiment_dirs, statuses, done)
+        if not jobs:
+            raise FileNotFoundError(
+                f"No job of {experiment_dirs} has a status in {sorted(statuses)}"
+                + (" and passes `done`." if done else ".")
+            )
+        all_labels = {
+            str(job): {**helper.job_labels(job), **_labels_for(labels, job)}
+            for job in jobs
+        }
+        return cls.from_dirs(jobs, labels=all_labels, **from_dirs_args)
 
     @classmethod
     def from_samples(
@@ -182,24 +306,29 @@ class RunSet:
         specs: Sequence = (),
         owners: Optional[OwnerScheme] = None,
         registry: Optional[Registry] = None,
+        cache: bool = True,
+        workers: int = 1,
     ) -> "RunSet":
         """Load every dump of each run, as one run per dump.
 
         A run that dumps its stats periodically (for example every
         millisecond of a region of interest, without a reset) leaves one
-        dump per sample (`dump_locations`). Each becomes a run with the
+        dump per sample (`Run.dumps()`). Each becomes a run with the
         directory's labels plus `sample` (0, 1, ... in order) and
         `sim_seconds` (the dump's `simSeconds`, None if it has none), so a
         stat indexed by them is a time series:
         `runs["numCycles"].to_frame()` has a row per sample.
-        `paths`, `labels`, `specs` and `owners` are as in `from_dirs`.
+        `paths`, `labels`, `specs`, `owners`, `cache` and `workers` are as
+        in `from_dirs`.
         """
         registry = registry if registry is not None else Registry(specs)
         runs = []
         for directory in _run_directories(paths):
             base_labels = _labels_for(labels, directory)
             tree = ConfigTree.from_file(directory / "config.json")
-            for sample, location in enumerate(dump_locations(directory)):
+            locations = dump_locations(directory)
+            all_lines = _read_all(locations, cache, workers)
+            for sample, (location, lines) in enumerate(zip(locations, all_lines)):
                 run = Run(
                     directory,
                     dict(base_labels, sample=sample),
@@ -207,6 +336,7 @@ class RunSet:
                     owners,
                     dump=location,
                     tree=tree,
+                    lines=lines,
                 )
                 run.labels["sim_seconds"] = run.sim_seconds
                 runs.append(run)
