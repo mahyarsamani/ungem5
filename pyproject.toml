@@ -21,6 +21,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+# NOTE: The learned memory estimate (experiment/api/model.py).
+model = ["scikit-learn"]
 
 [project.urls]
 Homepage = "https://github.com/mahyarsamani/experiment"

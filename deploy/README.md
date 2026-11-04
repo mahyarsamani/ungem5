@@ -17,8 +17,10 @@ Each job runs as the user who loaded it, in its own systemd unit inside `experim
 
 ```bash
 python3 -m venv /opt/experiment/venv
-/opt/experiment/venv/bin/pip install "git+https://github.com/mahyarsamani/experiment.git@<commit>"
+/opt/experiment/venv/bin/pip install "experiment[model] @ git+https://github.com/mahyarsamani/experiment.git@<commit>"
 ```
+
+The `model` extra (scikit-learn) gives the scheduler a learned memory estimate once 50 runs have finished; the workers don't need it.
 
 Root must never run code from a directory a user can write to, so the venv lives in `/opt`, owned by root.
 Install the same commit on every machine and in the venvs users run their consoles from, because the console and the scheduler exchange compiled scripts.

@@ -10,14 +10,16 @@ A job's estimate is the first of these that applies:
 
 1. history: runs with the same features finished; their largest peak,
    plus HISTORY_MARGIN.
-2. corrected guess: the user gave a guess, and at least MIN_GROUP_RUNS runs
+2. model: enough runs finished to learn from (see `model.py`); what the
+   model, refit every REFIT_EVERY new runs, reserves for jobs like it.
+3. corrected guess: the user gave a guess, and at least MIN_GROUP_RUNS runs
    of the job's group with guesses ended; the guess times the largest
    peak/guess ratio among the last GROUP_WINDOW of them, plus GROUP_MARGIN.
    So a guess is trusted only as far as the group's guesses were right.
-3. group: no guess, but runs of the group ended; their largest peak, plus
+4. group: no guess, but runs of the group ended; their largest peak, plus
    GROUP_MARGIN.
-4. guess: the user's guess, plus GUESS_MARGIN.
-5. default: the scheduler's default.
+5. guess: the user's guess, plus GUESS_MARGIN.
+6. default: the scheduler's default.
 
 Runs that failed or were killed may have stopped early, so their peaks never
 count as a full run; they only set a floor for jobs with the same features.
@@ -31,6 +33,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .model import PeakModel, Run
 from .resources import format_size
 from .work import Job
 
@@ -39,6 +42,7 @@ GROUP_MARGIN = 0.15
 GUESS_MARGIN = 0.25
 MIN_GROUP_RUNS = 3
 GROUP_WINDOW = 50
+REFIT_EVERY = 20
 COMPLETE = "exited"
 
 SCHEMA = """
@@ -109,6 +113,28 @@ class MemoryHistory:
         # NOTE: Job id -> (key, group, features); features may be costly
         # to compute and never change for a loaded job.
         self._described: dict[str, tuple[str, str, dict]] = {}
+        # NOTE: The model, complete runs since it was fit, and its
+        # predictions per job id (until the next fit).
+        self._model: PeakModel | None = None
+        self._since_fit = 0
+        self._predicted: dict[str, int] = {}
+        self._refit()
+
+    def _refit(self) -> None:
+        runs = [
+            Run(json.loads(features), grp, guess, peak)
+            for features, grp, guess, peak in self._db.execute(
+                "SELECT features, grp, guess, peak FROM runs WHERE outcome = ? "
+                "AND peak IS NOT NULL ORDER BY id",
+                (COMPLETE,),
+            )
+        ]
+        self._model = PeakModel.fit(runs)
+        self._since_fit = 0
+        self._predicted.clear()
+
+    def model(self) -> PeakModel | None:
+        return self._model
 
     def close(self) -> None:
         self._db.close()
@@ -139,9 +165,10 @@ class MemoryHistory:
 
     def forget(self, job_id: str) -> None:
         self._described.pop(job_id, None)
+        self._predicted.pop(job_id, None)
 
     def estimate(self, job: Job) -> Estimate:
-        key, group, _ = self.describe(job)
+        key, group, features = self.describe(job)
         guess = job.memory_guess()
         floor = max(self._partial.get(key, []), default=0)
 
@@ -163,6 +190,12 @@ class MemoryHistory:
                 f"{len(complete)} identical run(s), peak "
                 f"{format_size(max(complete))}",
             )
+        if self._model is not None:
+            predicted = self._predicted.get(job.id())
+            if predicted is None:
+                predicted = self._model.predict(features, group, guess)
+                self._predicted[job.id()] = predicted
+            return done(predicted, "model", self._model.describe())
         runs = self._group.get(group, [])
         guessed = [(peak, g) for peak, g in runs if g][-GROUP_WINDOW:]
         if guess and len(guessed) >= MIN_GROUP_RUNS:
@@ -234,6 +267,10 @@ class MemoryHistory:
         except sqlite3.IntegrityError:
             return False
         self._remember(key, group, outcome, peak, job.memory_guess())
+        if outcome == COMPLETE:
+            self._since_fit += 1
+            if self._since_fit >= REFIT_EVERY:
+                self._refit()
         return True
 
     def runs(self, job_id: str | None = None) -> list[dict]:
