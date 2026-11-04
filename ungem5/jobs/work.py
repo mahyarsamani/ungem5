@@ -694,8 +694,8 @@ class Experiment:
 
 
 def find_jobs(experiments: Iterable[Experiment]) -> Iterable[Job]:
-    for experiment in experiments:
-        yield from experiment.jobs()
+    for each in experiments:
+        yield from each.jobs()
 
 
 class ProjectConfiguration:
