@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ungem5"
-version = "0.26.10.2"
+version = "0.26.11.1"
 description = "Everything gem5 research needs that is not the simulator: builds, runs, a lab scheduler, and typed statistics."
 license = { text = "MIT" }
 authors = [{ name = "Mahyar Samani", email = "msamani@ucdavis.edu" }]
