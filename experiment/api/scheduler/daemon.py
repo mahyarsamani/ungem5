@@ -26,6 +26,7 @@ import time
 
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Iterable
 
 import rpyc
 
@@ -34,6 +35,7 @@ from rpyc.utils.server import ThreadedServer
 
 from rpyc.utils.helpers import classpartial
 
+from ...common import settings
 from ...common.log import error, info, install_warning_format
 from ..worker import PROTOCOL_CONFIG
 from .dashboard import Dashboard
@@ -46,10 +48,10 @@ DEFAULT_POLLING_SECS = 1.0
 
 class PeerUidAuthenticator:
     """Accept Unix-socket peers running as this user or, given
-    `allow_gid`, as any user but root in that group."""
+    `allow_gids`, as any user but root in one of those groups."""
 
-    def __init__(self, allow_gid: int | None = None) -> None:
-        self._allow_gid = allow_gid
+    def __init__(self, allow_gids: Iterable[int] = ()) -> None:
+        self._allow_gids = frozenset(allow_gids)
 
     def __call__(self, sock):
         creds = sock.getsockopt(
@@ -60,11 +62,11 @@ class PeerUidAuthenticator:
             account = pwd.getpwuid(uid)
         except KeyError:
             raise AuthenticationError(f"uid {uid} has no account") from None
-        if self._allow_gid is None:
+        if not self._allow_gids:
             allowed = uid == os.getuid()
         else:
-            allowed = uid != 0 and self._allow_gid in os.getgrouplist(
-                account.pw_name, account.pw_gid
+            allowed = uid != 0 and not self._allow_gids.isdisjoint(
+                os.getgrouplist(account.pw_name, account.pw_gid)
             )
         if not allowed:
             raise AuthenticationError(
@@ -151,17 +153,18 @@ def run_daemon(
     polling_secs: float = DEFAULT_POLLING_SECS,
     fresh: bool = False,
     log_to_stderr: bool = False,
-    lab_gid: int | None = None,
-    admins: tuple[str, ...] = (),
+    lab_gids: Iterable[int] = (),
+    admins: Iterable[str] = (),
     socket_file: Path | None = None,
 ) -> int:
-    """Run the scheduler until it is stopped. With `lab_gid`, it is a lab
-    scheduler for the members of that group, `admins` among them; its
+    """Run the scheduler until it is stopped. With `lab_gids`, it is a lab
+    scheduler for the members of those groups, `admins` among them; its
     socket (`socket_file`) is open to everyone, who are checked when they
     connect."""
-    lab = lab_gid is not None
+    lab_gids = frozenset(lab_gids)
+    lab = bool(lab_gids)
     if lab and socket_file is None:
-        error("A lab scheduler needs --socket.")
+        error("A lab scheduler needs a socket.")
         return 2
     lock = InstanceLock()
     if not lock.acquire(
@@ -219,7 +222,7 @@ def run_daemon(
         control = ThreadedServer(
             classpartial(ControlService, scheduler, dashboard),
             socket_path=str(sock_path),
-            authenticator=PeerUidAuthenticator(lab_gid),
+            authenticator=PeerUidAuthenticator(lab_gids),
             protocol_config=PROTOCOL_CONFIG,
             logger=logging.getLogger(f"{name}.control"),
         )
@@ -252,7 +255,11 @@ def run_daemon(
 
         scheduler.events().info(
             f"Scheduler {name} running (pid {os.getpid()})"
-            + (f" for group {lab_gid}." if lab else ".")
+            + (
+                f" for group(s) {', '.join(map(str, sorted(lab_gids)))}."
+                if lab
+                else "."
+            )
         )
         while not scheduler.wait_stopped(0.5):
             pass
@@ -329,11 +336,13 @@ def spawn_daemon(
 
 def main(argv: list[str] | None = None) -> int:
     install_warning_format()
-    parser = argparse.ArgumentParser(prog="experiment.api.scheduler.daemon")
-    parser.add_argument("--name", default=platform.node())
-    parser.add_argument(
-        "--dashboard-port", type=int, default=DEFAULT_DASHBOARD_PORT
+    parser = argparse.ArgumentParser(
+        prog="experiment.api.scheduler.daemon",
+        description="Run a scheduler. With --lab, a lab scheduler whose "
+        f"defaults come from [scheduler] in {settings.SYSTEM_FILE}.",
     )
+    parser.add_argument("--name")
+    parser.add_argument("--dashboard-port", type=int)
     parser.add_argument(
         "--polling-secs", type=float, default=DEFAULT_POLLING_SECS
     )
@@ -341,30 +350,53 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--foreground", action="store_true")
     parser.add_argument(
         "--lab",
+        action="store_true",
+        help="Serve every member of the allowed groups (a lab scheduler).",
+    )
+    parser.add_argument(
+        "--allow-gid",
         type=int,
-        metavar="GID",
-        help="Serve every member of this group (a lab scheduler).",
+        action="append",
+        help="Lab: a group whose members may use the scheduler; repeat for "
+        "several.",
     )
     parser.add_argument(
         "--admin",
         action="append",
-        default=[],
-        help="A lab user who may change hosts, partitions and anyone's "
+        help="Lab: a user who may change hosts, partitions and anyone's "
         "jobs; repeat for several.",
     )
     parser.add_argument(
-        "--socket", type=Path, help="The control socket (lab only)."
+        "--socket", type=Path, help="Lab: the control socket."
     )
     args = parser.parse_args(argv)
+    if not args.lab:
+        return run_daemon(
+            args.name or platform.node(),
+            args.dashboard_port or DEFAULT_DASHBOARD_PORT,
+            args.polling_secs,
+            args.fresh,
+            log_to_stderr=args.foreground,
+        )
+    try:
+        config = settings.load()["scheduler"]
+        admins = settings.user_names(args.admin or config["admins"])
+    except settings.SettingsError as e:
+        error(str(e))
+        return 2
+    gids = args.allow_gid or config["allow_gids"]
+    if not gids:
+        error("A lab scheduler needs [scheduler] allow_gids or --allow-gid.")
+        return 2
     return run_daemon(
-        args.name,
-        args.dashboard_port,
+        args.name or config["name"],
+        args.dashboard_port or config["dashboard_port"],
         args.polling_secs,
         args.fresh,
         log_to_stderr=args.foreground,
-        lab_gid=args.lab,
-        admins=tuple(args.admin),
-        socket_file=args.socket,
+        lab_gids=gids,
+        admins=admins,
+        socket_file=args.socket or Path(config["socket"]),
     )
 
 

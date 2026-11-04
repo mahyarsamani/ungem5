@@ -9,7 +9,9 @@ After=network-online.target remote-fs.target sssd.service
 [Service]
 User=experiment
 Group=experiment
-ExecStart=/opt/experiment/venv/bin/python -m experiment.api.scheduler.daemon --name lab --lab 1024023017 --admin msamani --socket /run/experiment/scheduler.sock --dashboard-port 9200
+# NOTE: The name, socket, port, groups and admins come from
+# /etc/experiment/config.toml.
+ExecStart=/opt/experiment/venv/bin/python -m experiment.api.scheduler.daemon --lab
 # NOTE: /run/experiment holds the socket that everyone opens; the lock lives
 # in its private subdirectory, and the state in /var/lib/experiment.
 RuntimeDirectory=experiment

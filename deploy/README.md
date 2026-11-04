@@ -2,7 +2,7 @@
 
 One scheduler serves the whole lab from liberty, and every machine runs one worker as root.
 Members of `coe-us-cs-darchr` (gid 1024023017) load their own scripts, see everyone's jobs, and change only their own.
-Admins (`--admin` in the scheduler's unit) also change hosts, limits and partitions.
+Admins (`admins` in the config file) also change hosts, limits and partitions.
 Each job runs as the user who loaded it, in its own systemd unit inside `experiment-<user>.slice`.
 
 ## How the pieces trust each other
@@ -16,6 +16,8 @@ Each job runs as the user who loaded it, in its own systemd unit inside `experim
 ## Install (once per machine, as root)
 
 ```bash
+mkdir -p /etc/experiment
+cp deploy/config.toml /etc/experiment/config.toml   # ports, groups, admins
 python3 -m venv /opt/experiment/venv
 /opt/experiment/venv/bin/pip install "experiment[model] @ git+https://github.com/mahyarsamani/experiment.git@<commit>"
 ```
@@ -49,8 +51,8 @@ systemctl daemon-reload
 systemctl enable --now experiment-worker
 ```
 
-The unit listens on port 9100.
-On perle another process holds 9100: change the port with `systemctl edit experiment-worker`, and give the same `port=` to that `Host` in `hosts.py`.
+The worker listens on the `[worker] port` of the config file, 9100 by default.
+On perle another process holds 9100: set another port in its config file, and give the same `port=` to that `Host` in `hosts.py`.
 
 ## The scheduler (liberty, as root)
 

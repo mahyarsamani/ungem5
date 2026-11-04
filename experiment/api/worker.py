@@ -9,8 +9,8 @@ Every job has an owner, a user name. A worker run by a user launches only
 that user's jobs, as its own children. A worker run by root (the lab setup)
 launches each job as its owner, in a transient systemd unit of its own in
 the slice experiment-<owner>.slice, so jobs outlive the worker and get their
-own cgroup; owners must have a uid of at least `min_uid` and be in the group
-`allow_gid`. Either way, a job's files are only ever touched as its owner
+own cgroup; owners must have a uid of at least `min_uid` and be in one of
+the groups `allow_gids`. Either way, a job's files are only ever touched as its owner
 (see `userio.py`).
 """
 
@@ -23,6 +23,8 @@ import subprocess
 import sys
 import threading
 import time
+
+from typing import Iterable
 
 import psutil
 import rpyc
@@ -64,16 +66,16 @@ def _status(result) -> tuple:
 
 class Worker(rpyc.Service):
     def __init__(
-        self, allow_gid: int | None = None, min_uid: int = DEFAULT_MIN_UID
+        self, allow_gids: Iterable[int] = (), min_uid: int = DEFAULT_MIN_UID
     ) -> None:
         super().__init__()
         self._root = os.geteuid() == 0
-        if self._root and allow_gid is None:
+        self._allow_gids = frozenset(allow_gids)
+        if self._root and not self._allow_gids:
             raise ValueError(
-                "a worker run by root needs the group whose members may run "
-                "jobs (allow_gid)"
+                "a worker run by root needs the groups whose members may run "
+                "jobs"
             )
-        self._allow_gid = allow_gid
         self._min_uid = min_uid
         self._user = pwd.getpwuid(os.getuid()).pw_name
         self._local = LocalIO()
@@ -104,10 +106,11 @@ class Worker(rpyc.Service):
             return account
         if account.pw_uid == 0 or account.pw_uid < self._min_uid:
             raise PermissionError(f"{user} may not run jobs here")
-        if self._allow_gid not in os.getgrouplist(user, account.pw_gid):
+        if self._allow_gids.isdisjoint(os.getgrouplist(user, account.pw_gid)):
             raise PermissionError(
-                f"{user} is not in group {self._allow_gid}, so may not run "
-                "jobs here"
+                f"{user} is not in group "
+                f"{', '.join(map(str, sorted(self._allow_gids)))}, so may "
+                "not run jobs here"
             )
         return account
 

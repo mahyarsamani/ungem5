@@ -8,8 +8,8 @@ from pathlib import Path
 
 from rpyc.utils.server import ThreadedServer
 
-from ..api.worker import DEFAULT_MIN_UID, PROTOCOL_CONFIG, Worker
-from ..common import pki
+from ..api.worker import PROTOCOL_CONFIG, Worker
+from ..common import pki, settings
 from ..common.log import error, info, warn
 
 
@@ -17,19 +17,11 @@ def parse_work_args(args):
     parser = argparse.ArgumentParser(
         prog="helper work",
         description="Run a worker that a scheduler can launch jobs on. "
-        "Connections use mutual TLS; see `helper certs`.",
+        "Connections use mutual TLS; see `helper certs`. Defaults come "
+        f"from [worker] in {settings.SYSTEM_FILE}.",
     )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=9100,
-        help="Port to listen on.",
-    )
-    parser.add_argument(
-        "--bind",
-        default="0.0.0.0",
-        help="Address to listen on (default: all interfaces).",
-    )
+    parser.add_argument("--port", type=int, help="Port to listen on.")
+    parser.add_argument("--bind", help="Address to listen on.")
     parser.add_argument(
         "--name",
         default=platform.node(),
@@ -49,13 +41,13 @@ def parse_work_args(args):
     parser.add_argument(
         "--allow-gid",
         type=int,
+        action="append",
         help="Run by root: launch jobs for members of this group, each as "
-        "its owner (required then).",
+        "its owner (required then; repeat for several groups).",
     )
     parser.add_argument(
         "--min-uid",
         type=int,
-        default=DEFAULT_MIN_UID,
         help="Run by root: never launch for users below this uid.",
     )
     return parser.parse_known_args(args)
@@ -65,12 +57,20 @@ def _process_work_args(known_args, unknown_args) -> int:
     if unknown_args:
         error(f"unrecognized arguments: {' '.join(unknown_args)}")
         return 2
+    try:
+        config = settings.load()["worker"]
+    except settings.SettingsError as e:
+        error(str(e))
+        return 2
+    port = known_args.port or config["port"]
+    allow_gids = known_args.allow_gid or config["allow_gids"]
+    min_uid = known_args.min_uid or config["min_uid"]
 
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
     authenticator = None
-    bind = known_args.bind
+    bind = known_args.bind or config["bind"]
     if known_args.insecure_localhost:
         bind = "127.0.0.1"
         warn(
@@ -95,15 +95,15 @@ def _process_work_args(known_args, unknown_args) -> int:
         authenticator = pki.RoleAuthenticator(cert, key, ca, pki.SCHEDULER)
 
     try:
-        worker = Worker(known_args.allow_gid, known_args.min_uid)
+        worker = Worker(allow_gids, min_uid)
     except ValueError as e:
-        error(f"{e}; pass --allow-gid.")
+        error(f"{e}; set [worker] allow_gids or pass --allow-gid.")
         return 2
     try:
         server = ThreadedServer(
             worker,
             hostname=bind,
-            port=known_args.port,
+            port=port,
             authenticator=authenticator,
             protocol_config=PROTOCOL_CONFIG,
             logger=logging.getLogger("worker"),
@@ -111,16 +111,16 @@ def _process_work_args(known_args, unknown_args) -> int:
     except OSError as e:
         if e.errno == errno.EADDRINUSE:
             error(
-                f"Port {known_args.port} is already in use, probably by "
+                f"Port {port} is already in use, probably by "
                 "another (or an old) worker. Find it with: "
-                f"ss -ltnp | grep :{known_args.port}  — or pick another "
+                f"ss -ltnp | grep :{port}  — or pick another "
                 "port with --port (and pass the same port to Host)."
             )
         else:
-            error(f"Could not listen on {bind}:{known_args.port}: {e}")
+            error(f"Could not listen on {bind}:{port}: {e}")
         return 1
     info(
-        f"Worker listening on {bind}:{known_args.port}"
+        f"Worker listening on {bind}:{port}"
         + ("" if authenticator is None else " (mutual TLS)")
     )
     try:
