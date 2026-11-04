@@ -54,6 +54,12 @@ EVERYONE = "*"
 # NOTE: How many new jobs' outdirs one host checks per tick for runs that
 # already ended.
 CHECK_BATCH = 500
+# NOTE: A job that outgrows its reservation is granted this much more than
+# it uses, if its host and its owner's partition have room.
+GRACE_FACTOR = 1.25
+# NOTE: Below this share of a host's memory free, its newest job is
+# paused; at twice it, the jobs paused that way go on.
+LOW_MEMORY_SHARE = 0.03
 
 
 def current_user() -> str:
@@ -226,6 +232,11 @@ class Scheduler:
         # NOTE: Jobs new to this scheduler whose outdirs nobody has checked
         # for a run that already ended; they don't launch until checked.
         self._unchecked: set[str] = set()
+        # NOTE: The least memory a job's next runs reserve, set by `retry`.
+        self._memory_floors: dict[str, int] = dict()
+        # NOTE: Per host, the resources report the low-memory check last
+        # acted on, so it acts once per report.
+        self._low_memory_seen: dict[str, float] = dict()
         self._dirty = True
 
         self._connect_pool = ThreadPoolExecutor(
@@ -251,6 +262,8 @@ class Scheduler:
             "partition": self._cmd_partition,
             "memory": self._cmd_memory,
             "signal": self._cmd_signal,
+            "resume": self._cmd_resume,
+            "retry": self._cmd_retry,
             "reset": self._cmd_reset,
             "stop": self._cmd_stop,
             "delete": self._cmd_delete,
@@ -426,6 +439,7 @@ class Scheduler:
                 self._poll_host(host)
         self._process_killing()
         self._process_host_removal()
+        self._check_memory()
         self._adopt_finished_runs()
         self._update_readiness()
         self._schedule()
@@ -488,22 +502,26 @@ class Scheduler:
         mine["cores"] += cores
         mine["memory"] += memory
 
-    def _within_partition(self, job: Job, host: Host, used: dict) -> bool:
-        """Whether `job` fits in its owner's partition of `host`: up to
-        the partition, or up to BORROW_MARGIN past it while other users
-        leave enough of theirs idle."""
+    def _share(self, host_name: str, user: str) -> dict | None:
+        """`user`'s partition of a host: theirs, or EVERYONE's."""
+        shares = self._partitions.get(host_name, {})
+        return shares.get(user) or shares.get(EVERYONE)
+
+    def _within_partition(
+        self, job: Job, host: Host, used: dict, cores: int, memory: int
+    ) -> bool:
+        """Whether `cores` and `memory` more for `job` fit in its owner's
+        partition of `host`: up to the partition, or up to BORROW_MARGIN
+        past it while other users leave enough of theirs idle."""
         shares = self._partitions.get(host.name())
         if not shares:
             return True
         user = job.owner() or self._user
-        share = shares.get(user) or shares.get(EVERYONE)
+        share = self._share(host.name(), user)
         if share is None:
             return False
         mine = used["users"].get(user, {"cores": 0, "memory": 0})
-        need = {
-            "cores": self._cores(job, host.name()),
-            "memory": self._estimate(job).memory,
-        }
+        need = {"cores": cores, "memory": memory}
         for key, amount in need.items():
             limit = share[key]
             if limit is None or mine[key] + amount <= limit:
@@ -522,6 +540,11 @@ class Scheduler:
         estimate = self._estimates.get(job.id())
         if estimate is None:
             estimate = self._memory.estimate(job)
+            floor = self._memory_floors.get(job.id(), 0)
+            if floor > estimate.memory:
+                estimate = Estimate(
+                    floor, "retry", f"at least {format_size(floor)} (`retry`)"
+                )
             self._estimates[job.id()] = estimate
         return estimate
 
@@ -538,7 +561,9 @@ class Scheduler:
         available = host.available_memory()
         if available is not None and memory > available - used["untouched"]:
             return False
-        return self._within_partition(job, host, used)
+        return self._within_partition(
+            job, host, used, self._cores(job, host.name()), memory
+        )
 
     def _too_big(self, job: Job) -> bool:
         """No host could ever take `job`, even empty."""
@@ -719,6 +744,9 @@ class Scheduler:
             new = job_status_from_worker(status)
             if new is None or new == before:
                 continue
+            if before == JobStatus.PAUSED and new == JobStatus.RUNNING:
+                # NOTE: Frozen processes are alive; we know it's paused.
+                continue
             job.set_status(new, returncode, message)
             if new.terminal() and job.end_time() is None:
                 # NOTE: No exit record (e.g. SIGKILL): when we noticed.
@@ -745,6 +773,139 @@ class Scheduler:
                     f"Job {job.id()[:8]} ({job.shorthand_command()}) was killed"
                     + (f": {message}" if message else ".")
                 )
+
+    def _check_memory(self) -> None:
+        """Deal with running jobs that outgrew their reservation, and with
+        hosts running out of memory."""
+        usage = self._usage()
+        for host in self._hosts.values():
+            if not host.up():
+                continue
+            used = usage[host.name()]
+            for job in self._active_jobs(host.name()):
+                if job.status() != JobStatus.RUNNING:
+                    continue
+                now, reserved = job.memory_now(), job.reserved()
+                if now is None or reserved is None or now <= reserved:
+                    continue
+                self._outgrown(job, host, used)
+            self._check_host_memory(host)
+
+    def _outgrown(self, job: Job, host: Host, used: dict) -> None:
+        """`job` uses more than it reserved: grant it more if there's room,
+        else do what its `on_memory_exceed` says."""
+        now, reserved = job.memory_now(), job.reserved()
+        grant = int(now * GRACE_FACTOR)
+        # NOTE: The job already holds `now`; it needs the rest.
+        extra = grant - now
+        limit = host.memory()
+        available = host.available_memory()
+        if (
+            (limit is None or used["memory"] + extra <= limit)
+            and (available is None or extra <= available - used["untouched"])
+            and self._within_partition(job, host, used, 0, extra)
+        ):
+            job.set_reserved(grant)
+            self._hold(used, job, 0, extra, extra)
+            self._dirty = True
+            self._events.info(
+                f"Job {job.id()[:12]} uses {format_size(now)}, past the "
+                f"{format_size(reserved)} reserved for it; reserved "
+                f"{format_size(grant)} now."
+            )
+            return
+        message = (
+            f"uses {format_size(now)} of the {format_size(reserved)} "
+            f"reserved, and {host.name()} has no room for more"
+        )
+        action = job.on_memory_exceed
+        if action == "pause":
+            self._pause(job, host, "memory", message)
+            return
+        try:
+            host.signal(job, SIGNAL.KILL.value)
+        except (HostUnreachable, JobError) as e:
+            self._events.error(f"Killing job {job.id()[:12]}: {e}")
+            return
+        self._dirty = True
+        if action == "kill":
+            job.set_status(JobStatus.FAILED, message=f"memory: {message}")
+            job.set_times(None, time.time())
+            self._record_memory(job, host, JobStatus.FAILED.value)
+            self._events.error(f"Job {job.id()[:12]} {message}; killed it.")
+            return
+        self._record_memory(job, host, JobStatus.KILLED.value)
+        self._memory_floors[job.id()] = grant
+        job.set_status(JobStatus.KILLED)
+        job.reset()
+        job.set_pending(JobStatus.QUEUED, f"retry with more memory: {message}")
+        self._events.warn(
+            f"Job {job.id()[:12]} {message}; killed it, and queued it again "
+            f"with {format_size(grant)}."
+        )
+
+    def _check_host_memory(self, host: Host) -> None:
+        """Once per resources report: if `host` is low on free memory
+        (e.g. from processes we don't run), pause its newest job; once it
+        has plenty again, let the oldest job paused that way go on."""
+        reported = host.reported()
+        if reported is None or self._low_memory_seen.get(
+            host.name()
+        ) == host.reported_at():
+            return
+        self._low_memory_seen[host.name()] = host.reported_at()
+        _, total, available = reported
+        low = total * LOW_MEMORY_SHARE
+        jobs = self._active_jobs(host.name())
+        if available < low:
+            running = [j for j in jobs if j.status() == JobStatus.RUNNING]
+            if running:
+                newest = max(running, key=lambda j: j.start_time() or 0)
+                self._pause(
+                    newest,
+                    host,
+                    "host",
+                    f"{host.name()} had only {format_size(available)} free; "
+                    "goes on once it has more",
+                )
+        elif available > 2 * low:
+            paused = [j for j in jobs if j.paused_for() == "host"]
+            if paused:
+                oldest = min(paused, key=lambda j: j.start_time() or 0)
+                if self._thaw(oldest, host):
+                    self._events.info(
+                        f"Job {oldest.id()[:12]} goes on: {host.name()} has "
+                        f"{format_size(available)} free again."
+                    )
+
+    def _pause(self, job: Job, host: Host, reason: str, message: str) -> None:
+        try:
+            frozen = host.freeze(job, True)
+        except (HostUnreachable, JobError) as e:
+            self._events.error(f"Pausing job {job.id()[:12]}: {e}")
+            return
+        if not frozen:
+            return
+        job.pause(reason, message)
+        self._dirty = True
+        short = job.id()[:12]
+        self._events.warn(
+            f"Paused job {short}: it {message}. `resume {short}` lets it go "
+            f"on, `retry {short} --memory SIZE` runs it again with more, "
+            f"`signal kill {short}` ends it."
+            if reason == "memory"
+            else f"Paused job {short}: {message}."
+        )
+
+    def _thaw(self, job: Job, host: Host) -> bool:
+        try:
+            host.freeze(job, False)
+        except (HostUnreachable, JobError) as e:
+            self._events.error(f"Resuming job {job.id()[:12]}: {e}")
+            return False
+        job.unpause()
+        self._dirty = True
+        return True
 
     def _adopt_finished_runs(self) -> None:
         """New jobs whose outdir holds a run of theirs that ended (e.g.
@@ -921,6 +1082,7 @@ class Scheduler:
     def _forget_job(self, job: Job) -> None:
         self._memory.forget(job.id())
         self._unchecked.discard(job.id())
+        self._memory_floors.pop(job.id(), None)
         self._launch_context.pop(job.id(), None)
         self._jobs.pop(job.id(), None)
         self._job_origin.pop(job.id(), None)
@@ -1054,6 +1216,25 @@ class Scheduler:
                 f"on {host.name()} with {format_size(memory)} reserved "
                 f"({self._estimate(job).source})."
             )
+            if host.name() in self._partitions:
+                # NOTE: After the launch, which made the owner's slice.
+                self._cap_user(host, job.owner() or self._user)
+
+    def _ceiling(self, host_name: str, user: str) -> int | None:
+        """All the memory `user`'s jobs may hold on a host: their
+        partition plus BORROW_MARGIN, or None for no limit."""
+        share = self._share(host_name, user)
+        if share is None or share["memory"] is None:
+            return None
+        return int(share["memory"] * (1 + BORROW_MARGIN))
+
+    def _cap_user(self, host: Host, user: str) -> None:
+        """Have `host`'s kernel hold `user`'s jobs to their ceiling, a
+        backstop for a spike faster than the memory checks."""
+        try:
+            host.set_user_memory(user, self._ceiling(host.name(), user))
+        except (HostUnreachable, JobError) as e:
+            self._logger.info(f"Capping {user} on {host.name()}: {e}")
 
     def _publish(self) -> None:
         usage = self._usage()
@@ -1142,6 +1323,7 @@ class Scheduler:
             },
             "killing": sorted(self._killing),
             "partitions": self._partitions,
+            "memory_floors": self._memory_floors,
             "deleted_jobs": sorted(self._deleted_jobs),
             "deleted_experiments": sorted(self._deleted_experiments),
             "jobs": {
@@ -1211,6 +1393,11 @@ class Scheduler:
             host: shares
             for host, shares in data["partitions"].items()
             if host in self._hosts
+        }
+        self._memory_floors = {
+            job_id: floor
+            for job_id, floor in data["memory_floors"].items()
+            if job_id in self._jobs
         }
 
         orphans = []
@@ -1631,7 +1818,22 @@ class Scheduler:
         Once a host has partitions, users without one (and with no
         EVERYONE partition) can't run there."""
         self._require_admin("change partitions")
-        self._host(host)
+        target = self._host(host)
+        lines = self._set_partition(host, user, cores, memory, clear)
+        if target.up():
+            owners = {job.owner() or self._user for job in self._active_jobs(host)}
+            for owner in owners | ({user} - {EVERYONE}):
+                self._cap_user(target, owner)
+        return lines
+
+    def _set_partition(
+        self,
+        host: str,
+        user: str,
+        cores: str | None,
+        memory: str | None,
+        clear: bool,
+    ) -> list[str]:
         shares = self._partitions.setdefault(host, {})
         if clear:
             shares.pop(user, None)
@@ -1731,10 +1933,70 @@ class Scheduler:
             except JobError as e:
                 lines.append(f"{job.id()[:8]}: {e}")
                 continue
+            if sent and job.status() == JobStatus.PAUSED:
+                # NOTE: A frozen job acts on a signal once it thaws.
+                self._thaw(job, host)
             lines.append(
                 f"{job.id()[:8]}: sent {signal}"
                 if sent
                 else f"{job.id()[:8]}: was not running"
+            )
+        return lines
+
+    def _cmd_resume(self, jobs: list[str]) -> list[str]:
+        """Let paused jobs go on; one paused for memory keeps what it
+        uses as its reservation."""
+        lines = []
+        for prefix in jobs:
+            job = self._resolve_job(prefix)
+            self._require_mine(job.id(), f"job {job.id()[:12]}")
+            host = self._hosts.get(job.host() or "")
+            if job.status() != JobStatus.PAUSED or host is None:
+                lines.append(f"{job.id()[:12]}: not paused")
+                continue
+            if not host.up():
+                lines.append(f"{job.id()[:12]}: host {host.name()} is down")
+                continue
+            if self._thaw(job, host):
+                job.set_reserved(max(job.reserved() or 0, job.memory_now() or 0))
+                lines.append(f"{job.id()[:12]}: resumed")
+        return lines
+
+    def _cmd_retry(
+        self, jobs: list[str], memory: str | None = None
+    ) -> list[str]:
+        """Run jobs again with more memory: `memory`, or their peak plus
+        GRACE_FACTOR. Running or paused jobs are killed first."""
+        try:
+            floor = parse_size(memory) if memory is not None else None
+        except ValueError as e:
+            raise CommandError(f"bad memory: {e}")
+        lines = []
+        for prefix in jobs:
+            job = self._resolve_job(prefix)
+            self._require_mine(job.id(), f"job {job.id()[:12]}")
+            if job.status().active():
+                host = self._hosts.get(job.host() or "")
+                if host is None or not host.up():
+                    lines.append(f"{job.id()[:12]}: its host is down")
+                    continue
+                try:
+                    host.signal(job, SIGNAL.KILL.value)
+                except (HostUnreachable, JobError) as e:
+                    lines.append(f"{job.id()[:12]}: {e}")
+                    continue
+                self._record_memory(job, host, JobStatus.KILLED.value)
+                job.set_status(JobStatus.KILLED)
+            wanted = floor or int(
+                max(job.memory_peak() or 0, job.memory_now() or 0)
+                * GRACE_FACTOR
+            )
+            if wanted:
+                self._memory_floors[job.id()] = wanted
+            job.reset()
+            lines.append(
+                f"{job.id()[:12]}: queued again"
+                + (f" with at least {format_size(wanted)}" if wanted else "")
             )
         return lines
 

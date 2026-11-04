@@ -30,6 +30,9 @@ class FakeRoot:
         self.users: list[str | None] = []
         # NOTE: outdir -> (job id, status) of a run that ended there.
         self.finished: dict[str, tuple] = {}
+        # NOTE: outdir -> whether it's frozen; user -> memory cap.
+        self.frozen: dict[str, bool] = {}
+        self.caps: dict[str, int | None] = {}
         self.down = False
 
     def _check(self):
@@ -62,6 +65,18 @@ class FakeRoot:
             (self.status.get(outdir, "missing"), None, None, None, None, None)
             for _, outdir in jobs
         )
+
+    def freeze_job(self, user, outdir, frozen):
+        self._check()
+        if self.status.get(outdir) != "running":
+            return False
+        self.frozen[outdir] = frozen
+        return True
+
+    def set_user_memory(self, user, limit):
+        self._check()
+        self.caps[user] = limit
+        return True
 
     def finished_runs(self, jobs):
         self._check()

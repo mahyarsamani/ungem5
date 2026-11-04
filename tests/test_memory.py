@@ -152,15 +152,20 @@ class MemoryRoot(FakeRoot):
     def __init__(self, cores=8, total=100 * G) -> None:
         super().__init__()
         self.memory: dict[str, tuple] = {}
-        self.cores, self.total = cores, total
+        self.cores, self.total, self.available = cores, total, total
+        # NOTE: outdir -> when its job started (1.0 if not given).
+        self.starts: dict[str, float] = {}
 
     def host_resources(self):
-        return self.cores, self.total, self.total
+        return self.cores, self.total, self.available
 
     def job_statuses(self, jobs):
         self._check()
         return tuple(
-            (self.status.get(o, "missing"), 0, None, 1.0, None, self.memory.get(o))
+            (
+                self.status.get(o, "missing"), 0, None,
+                self.starts.get(o, 1.0), None, self.memory.get(o),
+            )
             for _, o in jobs
         )
 

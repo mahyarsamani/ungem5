@@ -11,6 +11,8 @@ from .resources import Resources
 if TYPE_CHECKING:
     from .host import Host
 
+MEMORY_EXCEED_ACTIONS = ("pause", "kill", "retry")
+
 
 class JobStatus(Enum):
     QUEUED = "queued"
@@ -26,6 +28,9 @@ class JobStatus(Enum):
     # (waiting), or failed and need a reset (blocked).
     WAITING = "waiting"
     BLOCKED = "blocked"
+    # NOTE: Frozen on its host for memory: it keeps what it holds, and
+    # waits for `resume`, `retry` or a kill.
+    PAUSED = "paused"
 
     def color(self) -> str:
         return {
@@ -34,6 +39,7 @@ class JobStatus(Enum):
             JobStatus.QUEUED: "#FAFAFA",
             JobStatus.LAUNCHING: "#F59E0B",
             JobStatus.RUNNING: "#10B981",
+            JobStatus.PAUSED: "#FACC15",
             JobStatus.EXITED: "#6B7280",
             JobStatus.FAILED: "#EF4444",
             JobStatus.KILLED: "#090A0D",
@@ -45,6 +51,7 @@ class JobStatus(Enum):
         return self in (
             JobStatus.LAUNCHING,
             JobStatus.RUNNING,
+            JobStatus.PAUSED,
             JobStatus.UNKNOWN,
         )
 
@@ -92,6 +99,12 @@ class Job:
         self._id = id
         if not (isinstance(self.nice, int) and 0 <= self.nice <= 19):
             raise ValueError(f"{id}: nice must be 0 to 19, not {self.nice!r}")
+        if self.on_memory_exceed not in MEMORY_EXCEED_ACTIONS:
+            raise ValueError(
+                f"{id}: on_memory_exceed must be one of "
+                f"{', '.join(MEMORY_EXCEED_ACTIONS)}, not "
+                f"{self.on_memory_exceed!r}"
+            )
         self._aux_files = tuple(aux_files)
         self._dumps = tuple(dumps)
 
@@ -110,6 +123,9 @@ class Job:
         self._reserved: int | None = None
         self._memory_now: int | None = None
         self._memory_peak: int | None = None
+        # NOTE: Why a PAUSED job was frozen: "memory" (it outgrew its
+        # reservation) or "host" (its host ran low on memory).
+        self._paused_for: str | None = None
 
         self._parents: list[Job | PerHostJob] = []
         # NOTE: Set on the instances of a PerHostJob: the only host they
@@ -165,6 +181,10 @@ class Job:
     # this nice value (0 to 19), and its memory is sampled this often.
     nice = 0
     memory_interval = 120
+    # NOTE: What the scheduler does when the job outgrows its reservation
+    # and its host has no room to grant it more: "pause" it until you
+    # decide, "kill" it (it fails), or "retry" it with more memory.
+    on_memory_exceed = "pause"
 
     def compatible_with_host(self, host: "Host") -> bool:
         """Whether this job may run on `host`. Override to restrict it,
@@ -306,6 +326,22 @@ class Job:
         if peak is not None:
             self._memory_peak = max(peak, self._memory_peak or 0)
 
+    def set_reserved(self, reserved: int) -> None:
+        self._reserved = reserved
+
+    def paused_for(self) -> str | None:
+        return self._paused_for
+
+    def pause(self, reason: str, message: str) -> None:
+        self._status = JobStatus.PAUSED
+        self._paused_for = reason
+        self._message = message
+
+    def unpause(self) -> None:
+        self._status = JobStatus.RUNNING
+        self._paused_for = None
+        self._message = None
+
     def set_status(
         self,
         status: JobStatus,
@@ -332,6 +368,7 @@ class Job:
         self._reserved = None
         self._memory_now = None
         self._memory_peak = None
+        self._paused_for = None
 
     def assign(self, host_name: str, reserved: int | None = None) -> None:
         self._host_name = host_name
@@ -387,6 +424,7 @@ class Job:
             "reserved": self._reserved,
             "memory_now": self._memory_now,
             "memory_peak": self._memory_peak,
+            "paused_for": self._paused_for,
         }
 
     def restore_runtime_state(self, state: dict) -> None:
@@ -405,6 +443,7 @@ class Job:
         self._reserved = state.get("reserved")
         self._memory_now = state.get("memory_now")
         self._memory_peak = state.get("memory_peak")
+        self._paused_for = state.get("paused_for")
 
     def view(self) -> dict:
         return {
@@ -417,6 +456,8 @@ class Job:
             "reserved": self._reserved,
             "memory_now": self._memory_now,
             "memory_peak": self._memory_peak,
+            "paused_for": self._paused_for,
+            "on_memory_exceed": self.on_memory_exceed,
             "nice": self.nice,
             "host": self._host_name or "",
             "status": self._status.value,
@@ -448,6 +489,7 @@ class Job:
             "nice": self.nice,
             "memory_interval": self.memory_interval,
             "max_retries": self.max_retries,
+            "on_memory_exceed": self.on_memory_exceed,
             "files": [[label, str(path)] for label, path in self.files()],
             "dumps": [
                 [label, content, str(path)]
@@ -480,6 +522,7 @@ class LoadedJob(Job):
         self.nice = spec["nice"]
         self.memory_interval = spec["memory_interval"]
         self.max_retries = spec["max_retries"]
+        self.on_memory_exceed = spec["on_memory_exceed"]
         super().__init__(
             spec["experiment"],
             Path(spec["cwd"]),

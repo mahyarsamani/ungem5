@@ -168,7 +168,8 @@ class Dashboard:
         def api_action():
             """One action on jobs, an experiment or a script.
 
-            {"action": "kill"|"term"|"int"|"quit"|"reset"|"delete",
+            {"action": "kill"|"term"|"int"|"quit"|"reset"|"resume"|"retry"
+             |"delete",
              "job_ids": [...]}, or {"action": "delete", "experiment": name},
              or {"action": "delete", "script": path}.
             """
@@ -194,6 +195,8 @@ class Dashboard:
                     lines = self._call("delete", jobs=job_ids)
                 elif action == "reset":
                     lines = self._call("reset", jobs=job_ids)
+                elif action in ("resume", "retry"):
+                    lines = self._call(action, jobs=job_ids)
                 elif action in Scheduler.SIGNALS:
                     lines = self._call("signal", jobs=job_ids, signal=action)
                 else:

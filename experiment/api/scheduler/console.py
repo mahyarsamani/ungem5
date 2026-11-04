@@ -233,6 +233,21 @@ def build_parser() -> tuple[ConsoleParser, dict[str, ConsoleParser]]:
     )
     _arg(p, "job", completer="job")
 
+    p = add("resume", "Let paused jobs go on.")
+    _arg(p, "jobs", nargs="+", completer="job")
+
+    p = add(
+        "retry",
+        "Run jobs again with more memory (paused or running ones are "
+        "killed first).",
+    )
+    _arg(p, "jobs", nargs="+", completer="job")
+    _arg(
+        p,
+        "--memory",
+        help="At least this much, like 16G (default: their peak plus 25%%).",
+    )
+
     p = add("kill", "Kill all jobs of an experiment and remove it.")
     _arg(p, "experiment", completer="experiment")
 
@@ -954,6 +969,10 @@ class Console:
             self._execute(
                 "capacity", host=args.host, cores=args.cores, memory=args.memory
             )
+        elif canonical == "resume":
+            self._execute("resume", jobs=args.jobs)
+        elif canonical == "retry":
+            self._execute("retry", jobs=args.jobs, memory=args.memory)
         elif canonical == "partition":
             self._execute(
                 "partition",

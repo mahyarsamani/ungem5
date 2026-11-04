@@ -256,33 +256,87 @@ class Worker(rpyc.Service):
             for run in self._per_user("finished_runs", jobs)
         )
 
-    def exposed_signal_job(self, user: str, outdir: str, signum: int) -> bool:
-        """Returns False if the job wasn't running (nothing to signal)."""
-        signum = int(signum)
-        if signum not in ALLOWED_SIGNALS:
-            raise ValueError(f"signal {signum} is not allowed")
+    def _leader(self, user: str, outdir: str) -> tuple[int, int] | None:
+        """(pid, pgid) of the job's runner, or None if it isn't running.
+
+        The owner wrote launch.json, so this checks that it names a
+        process group the owner leads before anyone acts on it, as root
+        or not.
+        """
         account = self._account(user)
         launch = self._io(user).call("launch_record", str(outdir))
         if launch is None or not leader_alive(launch):
-            return False
-        # NOTE: The owner wrote launch.json, so check that it names their
-        # own process group before signalling it, as root or not.
+            return None
         try:
             leader = psutil.Process(launch["pid"])
             owner = leader.uids().real
             pgid = os.getpgid(launch["pid"])
         except (psutil.NoSuchProcess, ProcessLookupError):
-            return False
+            return None
         if owner != account.pw_uid or pgid != launch["pgid"]:
             raise PermissionError(
                 f"the launch record in {outdir} names a process group "
                 f"{user} doesn't lead"
             )
+        return launch["pid"], pgid
+
+    def exposed_signal_job(self, user: str, outdir: str, signum: int) -> bool:
+        """Returns False if the job wasn't running (nothing to signal)."""
+        signum = int(signum)
+        if signum not in ALLOWED_SIGNALS:
+            raise ValueError(f"signal {signum} is not allowed")
+        leader = self._leader(user, outdir)
+        if leader is None:
+            return False
         try:
-            os.killpg(pgid, signum)
+            os.killpg(leader[1], signum)
         except ProcessLookupError:
             return False
         return True
+
+    def exposed_freeze_job(self, user: str, outdir: str, frozen: bool) -> bool:
+        """Freeze (or thaw) the whole job: as root through its unit's
+        cgroup, else by stopping (or continuing) its process group. A
+        frozen job keeps its memory and stops using CPU; SIGKILL still
+        ends it. Returns False if the job wasn't running."""
+        leader = self._leader(user, outdir)
+        if leader is None:
+            return False
+        pid, pgid = leader
+        if not self._root:
+            stop = signal_module.SIGSTOP if frozen else signal_module.SIGCONT
+            os.killpg(pgid, stop)
+            return True
+        with open(f"/proc/{pid}/cgroup") as f:
+            path = f.read().strip().partition("::")[2]
+        slice_dir = f"/experiment.slice/experiment-{unit_name(user)}.slice/"
+        if not path.startswith(slice_dir):
+            raise PermissionError(f"{outdir}'s job runs outside {slice_dir}")
+        with open(f"/sys/fs/cgroup{path}/cgroup.freeze", "w") as f:
+            f.write("1" if frozen else "0")
+        return True
+
+    def exposed_set_user_memory(self, user: str, limit: int | None) -> bool:
+        """Cap the memory of all `user`'s jobs here (their slice), or lift
+        the cap with None; the kernel kills a job that pushes past it.
+        Only a worker run by root has slices; others return False."""
+        self._account(user)
+        if not self._root:
+            return False
+        result = subprocess.run(
+            [
+                "systemctl",
+                "set-property",
+                "--runtime",
+                f"experiment-{unit_name(user)}.slice",
+                f"MemoryMax={'infinity' if limit is None else int(limit)}",
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return result.returncode == 0
 
     def exposed_read_file(
         self, user: str, outdir: str, label: str, offset: int, length: int

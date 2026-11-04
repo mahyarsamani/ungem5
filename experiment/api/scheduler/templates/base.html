@@ -83,8 +83,8 @@
 
   <script id="initial-state" type="application/json">{{ state|tojson }}</script>
   <script>
-    const STATUSES = ["waiting", "blocked", "queued", "launching", "running", "unknown", "exited", "failed", "killed"];
-    const ACTIVE = ["launching", "running", "unknown"];
+    const STATUSES = ["waiting", "blocked", "queued", "launching", "running", "paused", "unknown", "exited", "failed", "killed"];
+    const ACTIVE = ["launching", "running", "paused", "unknown"];
     const FINISHED = ["exited", "failed", "killed"];
 
     const $ = (id) => document.getElementById(id);
@@ -249,6 +249,8 @@
               `<a href="${esc(fileHref(j, label))}" target="_blank" rel="noopener">${esc(label)}</a>`).join("")}</div>
           </td>
           <td class="actions">
+            ${j.status === "paused" ? `<button type="button" class="row-btn" data-action="resume">Resume</button>
+            <button type="button" class="row-btn" data-action="retry">Retry</button>` : ""}
             <button type="button" class="row-btn danger" data-action="kill" ${active ? "" : "disabled"}>Kill</button>
             <button type="button" class="row-btn" data-action="reset" ${finished ? "" : "disabled"}>Reset</button>
             <button type="button" class="row-btn danger" data-action="delete" ${active ? "disabled" : ""}>Delete</button>
@@ -363,7 +365,7 @@
       return ok;
     }
 
-    const VERBS = { kill: "Send SIGKILL to", term: "Send SIGTERM to", int: "Send SIGINT to", quit: "Send SIGQUIT to", reset: "Reset", delete: "Delete" };
+    const VERBS = { kill: "Send SIGKILL to", term: "Send SIGTERM to", int: "Send SIGINT to", quit: "Send SIGQUIT to", reset: "Reset", delete: "Delete", resume: "Resume", retry: "Kill and run again with more memory" };
 
     jobsEl.addEventListener("click", (ev) => {
       const target = ev.target;

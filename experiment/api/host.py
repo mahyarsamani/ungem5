@@ -171,6 +171,10 @@ class Host:
     def reported(self) -> tuple[int, int, int] | None:
         return self._reported
 
+    def reported_at(self) -> float:
+        """When the worker last reported its resources."""
+        return self._reported_at
+
     def refresh_resources(self, force: bool = False) -> None:
         """Ask the worker for its cores and memory, at most every
         RESOURCES_REFRESH_SECS."""
@@ -341,6 +345,16 @@ class Host:
             except json.JSONDecodeError:
                 pass
         return samples
+
+    def freeze(self, job: Job, frozen: bool) -> bool:
+        return bool(
+            self._call(
+                "freeze_job", job.owner(), job.outdir().as_posix(), frozen
+            )
+        )
+
+    def set_user_memory(self, user: str, limit: int | None) -> bool:
+        return bool(self._call("set_user_memory", user, limit))
 
     def signal(self, job: Job, signum: int) -> bool:
         return bool(
