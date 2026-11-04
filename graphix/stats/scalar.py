@@ -70,12 +70,19 @@ class Scalar(Stat):
 
     # Arithmetic -----------------------------------------------------------
 
-    def _binary(self, other: Any, symbol: str, how: str = "strict", reflected: bool = False) -> "Stat":
+    def _binary(
+        self,
+        other: Any,
+        symbol: str,
+        how: str = "strict",
+        reflected: bool = False,
+        fill_value: float = 0.0,
+    ) -> "Stat":
         function = OPERATORS[symbol]
         if isinstance(other, Stat):
             if not isinstance(other, Scalar):
                 return NotImplemented
-            pairs = align(self, other, how)
+            pairs = align(self, other, how, fill_value)
             data = OrderedDict(
                 (index, function(b, a) if reflected else function(a, b))
                 for index, a, b in pairs
@@ -142,17 +149,25 @@ class Scalar(Stat):
     def __neg__(self):
         return self._new(OrderedDict((i, -v) for i, v in self.items()), name=f"(-{self.name})")
 
-    def add(self, other, how: str = "strict"):
-        return self._binary(other, "+", how)
+    # `how`: "strict" (the operators' rule), "inner" (shared indexes only) or
+    # "outer" (every index of either side, a missing value being fill_value).
+    def add(self, other, how: str = "strict", fill_value: float = 0.0):
+        return self._binary(other, "+", how, fill_value=fill_value)
 
-    def sub(self, other, how: str = "strict"):
-        return self._binary(other, "-", how)
+    def sub(self, other, how: str = "strict", fill_value: float = 0.0):
+        return self._binary(other, "-", how, fill_value=fill_value)
 
-    def mul(self, other, how: str = "strict"):
-        return self._binary(other, "*", how)
+    def mul(self, other, how: str = "strict", fill_value: float = 0.0):
+        return self._binary(other, "*", how, fill_value=fill_value)
 
-    def div(self, other, how: str = "strict"):
-        return self._binary(other, "/", how)
+    def div(self, other, how: str = "strict", fill_value: float = 0.0):
+        return self._binary(other, "/", how, fill_value=fill_value)
+
+    def scale(self, factor: float, unit: Optional[str] = None) -> "Scalar":
+        """Multiply every value by `factor` and set the unit (for example
+        ticks to cycles with `1 / ticks_per_cycle` and `unit="Cycle"`)."""
+        data = OrderedDict((index, value * factor) for index, value in self.items())
+        return self._new(data, unit=unit)
 
     def apply(self, function: Callable[[float], float], name: Optional[str] = None) -> "Scalar":
         """Apply a function to every value."""

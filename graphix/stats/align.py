@@ -4,7 +4,9 @@ Two stats align in one of two ways:
 1. By index: both have values under the same indexes (same run labels,
    owner, dims, and occurrence).
    With `how="strict"` the index sets must be equal; with `how="inner"` only
-   their intersection is kept.
+   their intersection is kept; with `how="outer"` their union is kept, and
+   a side's missing value is `fill` (zero for numbers, the natural reading
+   of a counter gem5 left out because it was zero).
 2. By run: the right-hand stat has exactly one value per run (for example,
    `simTicks`, owned by the root), so that value applies to every index of
    the left-hand stat with the same run labels.
@@ -22,11 +24,31 @@ class AlignmentError(ValueError):
     pass
 
 
-def align(left: Stat, right: Stat, how: str = "strict") -> Aligned:
-    if how not in ("strict", "inner"):
-        raise ValueError("how must be 'strict' or 'inner'.")
+def align(
+    left: Stat,
+    right: Stat,
+    how: str = "strict",
+    fill: Any = 0.0,
+    fill_right: Any = None,
+) -> Aligned:
+    """Pair `left` and `right` (see the module); with `how="outer"`, a
+    missing left value is `fill` and a missing right one `fill_right`
+    (default: `fill`)."""
+    if how not in ("strict", "inner", "outer"):
+        raise ValueError("how must be 'strict', 'inner' or 'outer'.")
     left_keys = list(left.indexes())
     right_data = dict(right.items())
+    if how == "outer":
+        fill_right = fill if fill_right is None else fill_right
+        union = left_keys + [index for index in right_data if index not in left]
+        return [
+            (
+                index,
+                left[index] if index in left else fill,
+                right_data.get(index, fill_right),
+            )
+            for index in union
+        ]
     if any(index in right_data for index in left_keys):
         missing_right = [index for index in left_keys if index not in right_data]
         missing_left = [index for index in right_data if index not in left]

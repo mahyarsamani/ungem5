@@ -318,7 +318,10 @@ class Stat:
         return self._new(data)
 
     def _check_reduction_unit(self, how: str, over: Tuple[str, ...]) -> None:
-        if how == "sum" and self._unit and not _is_additive(self._unit):
+        # Only a known ratio or rate warns: gem5 prints many counters with no
+        # unit (`Unspecified`), and those add up.
+        known = self._unit not in (None, "", "Unspecified")
+        if how == "sum" and known and not _is_additive(self._unit):
             warn(
                 f"Summing '{self._name}' with unit '{self._unit}' over "
                 f"{', '.join(over)}; ratios and rates usually need "
@@ -352,11 +355,19 @@ class Stat:
     def rows(self) -> List[Dict[str, Any]]:
         raise NotImplementedError
 
+    def value_columns(self, **kwargs) -> List[str]:
+        """The columns a row has after its index columns, for an empty
+        export to keep its shape."""
+        return ["stat", "value", "unit"]
+
     def to_frame(self, **kwargs):
-        """A long pandas DataFrame, one row per number."""
+        """A long pandas DataFrame, one row per number; an empty stat gives an
+        empty frame with the usual columns."""
         import pandas as pd
 
         rows = self.rows(**kwargs)
+        if not rows:
+            return pd.DataFrame(columns=["owner", *self.value_columns(**kwargs)])
         return pd.DataFrame(rows)
 
 

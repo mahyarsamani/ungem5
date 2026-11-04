@@ -74,28 +74,47 @@ class Buckets:
             return math.nan
         return math.fsum(c * _midpoint(lo, hi) for lo, hi, c in self.buckets) / total
 
-    def quantile(self, q: float) -> float:
-        """The q-quantile, interpolating linearly inside a bucket."""
+    def _total(self, tails: bool) -> float:
+        total = math.fsum(c for _, _, c in self.buckets)
+        return total + self.underflow + self.overflow if tails else total
+
+    def quantile(self, q: float, tails: bool = True) -> float:
+        """The q-quantile, interpolating linearly inside a bucket.
+
+        With `tails` (the default) a Distribution's underflow and overflow
+        count as samples, and a quantile that falls in one returns `-inf` or
+        `inf`: below or above every bucket, value unknown.
+        Without, only the buckets count.
+        """
         if not 0 <= q <= 1:
             raise ValueError("q must be within [0, 1].")
-        total = math.fsum(c for _, _, c in self.buckets)
+        total = self._total(tails)
         if not total:
             return math.nan
         target = q * total
-        running = 0.0
+        running = self.underflow if tails else 0.0
+        if tails and self.underflow and target <= running:
+            return -math.inf
         for lo, hi, count in self.buckets:
             if count and running + count >= target:
                 return lo + (hi - lo) * (target - running) / count
             running += count
-        return self.buckets[-1][1]
+        if tails and self.overflow:
+            return math.inf
+        return self.buckets[-1][1] if self.buckets else math.nan
 
-    def pdf(self) -> List[float]:
-        total = math.fsum(c for _, _, c in self.buckets)
+    def pdf(self, tails: bool = True) -> List[float]:
+        """Each bucket's share of the samples (of every sample, tails
+        included, with `tails`)."""
+        total = self._total(tails)
         return [c / total if total else math.nan for _, _, c in self.buckets]
 
-    def cdf(self) -> List[float]:
-        total = math.fsum(c for _, _, c in self.buckets)
-        running, values = 0.0, []
+    def cdf(self, tails: bool = True) -> List[float]:
+        """The share of samples up to each bucket's end; with `tails`, over
+        every sample, so the underflow is counted from the start and the
+        last bucket ends below 1 when there is an overflow."""
+        total = self._total(tails)
+        running, values = (self.underflow if tails else 0.0), []
         for _, _, count in self.buckets:
             running += count
             values.append(running / total if total else math.nan)
@@ -250,14 +269,36 @@ class Histogram(Stat):
         `exact` is set, else the estimate from bucket midpoints."""
         return self._scalar("mean", lambda b: b.mean(exact), self.unit)
 
-    def quantile(self, q: float) -> Scalar:
-        return self._scalar(f"q{q:g}", lambda b: b.quantile(q), self.unit)
+    def quantile(self, q: float, tails: bool = True) -> Scalar:
+        """The q-quantile per index; `-inf` or `inf` when it falls in the
+        underflow or overflow (see `Buckets.quantile`)."""
+        return self._scalar(f"q{q:g}", lambda b: b.quantile(q, tails), self.unit)
+
+    def scale(self, factor: float, unit: Optional[str] = None) -> "Histogram":
+        """Multiply every bucket edge (and the exact sum of values) by
+        `factor`, for example ticks to cycles with `1 / ticks_per_cycle`;
+        counts stay as they are."""
+        data = OrderedDict()
+        for index, value in self.items():
+            data[index] = Buckets(
+                tuple((lo * factor, hi * factor, c) for lo, hi, c in value.buckets),
+                value.underflow,
+                value.overflow,
+                value.exact,
+                None if value.value_sum is None else value.value_sum * factor,
+            )
+        return self._new(data, unit=unit)
+
+    def drop_empty(self) -> "Histogram":
+        """Drop the indexes whose histogram has no sample."""
+        data = OrderedDict((i, v) for i, v in self.items() if v.samples)
+        return self._new(data)
 
     def rebin(self, edges: Sequence[float]) -> "Histogram":
         data = OrderedDict((index, value.rebin(edges)) for index, value in self.items())
         return self._new(data)
 
-    def rows(self, kind: str = "buckets") -> List[Dict[str, Any]]:
+    def rows(self, kind: str = "buckets", tails: bool = False) -> List[Dict[str, Any]]:
         columns = self._index_columns()
         rows = []
         for index, value in self.items():
@@ -280,14 +321,38 @@ class Histogram(Stat):
                 continue
             if kind != "buckets":
                 raise ValueError("kind must be 'buckets' or 'summary'.")
+            samples = value.samples
+            share = lambda count: count / samples if samples else math.nan  # noqa: E731
+            if tails and value.underflow:
+                first = value.buckets[0][0] if value.buckets else math.inf
+                row = dict(base)
+                row.update(lo=-math.inf, hi=first, count=value.underflow,
+                           pdf=share(value.underflow), cdf=share(value.underflow))
+                rows.append(row)
             for (lo, hi, count), pdf, cdf in zip(value.buckets, value.pdf(), value.cdf()):
                 row = dict(base)
                 row.update(lo=lo, hi=hi, count=count, pdf=pdf, cdf=cdf)
                 rows.append(row)
+            if tails and value.overflow:
+                last = value.buckets[-1][1] if value.buckets else -math.inf
+                row = dict(base)
+                row.update(lo=last, hi=math.inf, count=value.overflow,
+                           pdf=share(value.overflow), cdf=1.0)
+                rows.append(row)
         return rows
 
-    def to_frame(self, kind: str = "buckets"):
-        """`kind="buckets"`: lo, hi, count, pdf, cdf per bucket;
+    def value_columns(self, kind: str = "buckets", tails: bool = False) -> List[str]:
+        if kind == "summary":
+            return ["stat", "samples", "mean", "mean_exact", "p50", "p90", "p99",
+                    "underflow", "overflow", "exact"]
+        return ["stat", "lo", "hi", "count", "pdf", "cdf"]
+
+    def to_frame(self, kind: str = "buckets", tails: bool = False):
+        """`kind="buckets"`: lo, hi, count, pdf, cdf per bucket, where pdf
+        and cdf are shares of every sample (a Distribution's underflow and
+        overflow included); `tails=True` adds the underflow and overflow as
+        rows with an infinite edge.
         `kind="summary"`: samples, mean (and whether it is gem5's exact
-        one, `mean_exact`), and quantiles per index."""
-        return super().to_frame(kind=kind)
+        one, `mean_exact`), and quantiles over every sample per index (inf
+        when one falls in a tail)."""
+        return super().to_frame(kind=kind, tails=tails)

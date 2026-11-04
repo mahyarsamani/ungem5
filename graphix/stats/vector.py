@@ -71,7 +71,14 @@ class Vector(Stat):
 
     # Arithmetic -----------------------------------------------------------
 
-    def _binary(self, other: Any, symbol: str, how: str = "strict", reflected: bool = False):
+    def _binary(
+        self,
+        other: Any,
+        symbol: str,
+        how: str = "strict",
+        reflected: bool = False,
+        fill_value: float = 0.0,
+    ):
         function = OPERATORS[symbol]
 
         def apply(a, b):
@@ -79,7 +86,8 @@ class Vector(Stat):
 
         if isinstance(other, Vector):
             data = OrderedDict()
-            for index, a, b in align(self, other, how):
+            # A missing vector is one with no element: every element is 0.
+            for index, a, b in align(self, other, how, {}, {}):
                 names = list(OrderedDict.fromkeys(list(a) + list(b)))
                 data[index] = OrderedDict(
                     (n, apply(a.get(n, 0.0), b.get(n, 0.0))) for n in names
@@ -89,7 +97,7 @@ class Vector(Stat):
         elif isinstance(other, Scalar):
             data = OrderedDict(
                 (index, OrderedDict((n, apply(v, b)) for n, v in a.items()))
-                for index, a, b in align(self, other, how)
+                for index, a, b in align(self, other, how, {}, fill_value)
             )
             unit = combine_units(self.unit, other.unit, symbol)
             name = f"({self.name} {symbol} {other.name})"
@@ -128,17 +136,27 @@ class Vector(Stat):
     def __rtruediv__(self, other):
         return self._binary(other, "/", reflected=True)
 
-    def add(self, other, how: str = "strict"):
-        return self._binary(other, "+", how)
+    # `how` as in Scalar; with "outer", a missing vector has no element (all
+    # zero) and a missing scalar is fill_value.
+    def add(self, other, how: str = "strict", fill_value: float = 0.0):
+        return self._binary(other, "+", how, fill_value=fill_value)
 
-    def sub(self, other, how: str = "strict"):
-        return self._binary(other, "-", how)
+    def sub(self, other, how: str = "strict", fill_value: float = 0.0):
+        return self._binary(other, "-", how, fill_value=fill_value)
 
-    def mul(self, other, how: str = "strict"):
-        return self._binary(other, "*", how)
+    def mul(self, other, how: str = "strict", fill_value: float = 0.0):
+        return self._binary(other, "*", how, fill_value=fill_value)
 
-    def div(self, other, how: str = "strict"):
-        return self._binary(other, "/", how)
+    def div(self, other, how: str = "strict", fill_value: float = 0.0):
+        return self._binary(other, "/", how, fill_value=fill_value)
+
+    def scale(self, factor: float, unit: Optional[str] = None) -> "Vector":
+        """Multiply every element by `factor` and set the unit."""
+        data = OrderedDict(
+            (index, OrderedDict((n, v * factor) for n, v in value.items()))
+            for index, value in self.items()
+        )
+        return self._new(data, unit=unit)
 
     # Reduction and export -------------------------------------------------
 
@@ -148,6 +166,9 @@ class Vector(Stat):
             (n, reduce_numbers(how, [value.get(n, 0.0) for value in values], weights))
             for n in names
         )
+
+    def value_columns(self, **kwargs) -> List[str]:
+        return ["stat", self.element_dim, "value", "unit"]
 
     def rows(self) -> List[Dict[str, Any]]:
         columns = self._index_columns()

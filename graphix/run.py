@@ -24,7 +24,7 @@ from .owners import OwnerScheme
 from .parse import StatLine, dump_locations, dump_scalars, find_dump_file, read_dump
 from .records import Block, DumpBlocks, build_blocks, suggest_specs
 from .specs import Registry
-from .stats import KINDS, Index, Stat
+from .stats import KINDS, Histogram, Index, Stat
 
 Labels = Union[None, Dict[str, Any], Callable[[Path], Dict[str, Any]]]
 
@@ -130,6 +130,17 @@ class Run:
             raise KeyError(
                 f"{self.path.name}: no {machine}_Controller with version {version}."
             ) from None
+
+    def ticks_per_cycle(self, domain: str = "board.clk_domain") -> float:
+        """The clock period of a clock domain in ticks, from `config.json`
+        (gem5 stores a `SrcClockDomain`'s `clock` as a list of periods; the
+        first is the one in use without DVFS)."""
+        clock = self.tree[domain].params.get("clock")
+        if isinstance(clock, list):
+            clock = clock[0] if clock else None
+        if not clock:
+            raise KeyError(f"{self.path.name}: '{domain}' has no clock period.")
+        return float(clock)
 
     def controller(self, machine_id: str) -> str:
         """The path of a controller named like gem5's MachineID (`Cache_12`)."""
@@ -402,9 +413,8 @@ class RunSet:
                         "description": block.description,
                     }
                 row["blocks"] += 1
-        frame = pd.DataFrame(list(rows.values()))
-        if frame.empty:
-            return frame
+        columns = ["name", "kind", "owner_class", "unit", "dims", "blocks", "description"]
+        frame = pd.DataFrame(list(rows.values()), columns=columns)
         return frame.sort_values(["name", "owner_class"]).reset_index(drop=True)
 
     def suggest_specs(self, min_variants: int = 3) -> List[str]:
@@ -482,10 +492,12 @@ class RunSet:
             }
             # A run where gem5 printed none of the stat (all zero) still gets
             # zeros when the stat has no dims; with dims, only the dim values
-            # that run printed are known.
+            # that run printed are known. Histograms are never filled into
+            # such a run: a variant that never samples one (a ref run's
+            # hovLdindE2ELatency) has no histogram, not an empty one.
             no_dims = all(dims == () for entries in raw.values() for (_, dims, _) in entries)
-            for run in self.runs:
-                if no_dims:
+            if no_dims and not issubclass(cls, Histogram):
+                for run in self.runs:
                     raw.setdefault(run, OrderedDict())
             for run, entries in raw.items():
                 owners = [obj.path for obj in run.tree if obj.cxx_class in classes]
