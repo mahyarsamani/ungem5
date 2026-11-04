@@ -6,6 +6,7 @@ import pytest
 
 from experiment.api.scheduler.scheduler import CommandError, Scheduler
 from experiment.api.scheduler.state import StateStore
+from experiment.api.resources import Resources
 from experiment.api.work import Experiment, Job, JobStatus, PerHostJob
 
 from test_scheduler import FakeRoot, make_host, run
@@ -13,10 +14,10 @@ from test_scheduler import FakeRoot, make_host, run
 S = JobStatus
 
 
-def job(tmp_path, name, after=(), demand=1, cls=Job):
+def job(tmp_path, name, after=(), cores=1, cls=Job):
     return cls(
-        "e", tmp_path, name, name, tmp_path / "e" / name, demand, name,
-        after=after,
+        "e", tmp_path, name, name, tmp_path / "e" / name,
+        Resources(cores=cores), name, after=after,
     )
 
 
@@ -29,7 +30,8 @@ class FakeBuild(PerHostJob):
 
     def make_job(self, host_name, id, outdir):
         return Job(
-            "builds", outdir, "build", "build", outdir, self.threads, id
+            "builds", outdir, "build", "build", outdir,
+            Resources(cores=self.threads), id,
         )
 
 
@@ -161,7 +163,7 @@ def test_per_host_builds_gate_each_host(tmp_path):
     # NOTE: x1 is full now; x2 has room but its build failed.
     late = job(tmp_path, "late", after=[build], cls=X86Job)
     install(scheduler, late)
-    scheduler._hosts["x1"].set_capacity(3)  # NOTE: full with the 3 sims
+    scheduler._hosts["x1"].set_limits(cores=3)  # NOTE: full with the 3 sims
     scheduler._tick()
     assert late.status() == S.QUEUED
     view = next(v for v in scheduler.snapshot().jobs if v["id"] == "late")
@@ -206,7 +208,7 @@ def test_builds_take_at_most_their_host(tmp_path):
     scheduler._tick()
     instance = scheduler._jobs["build-main@x1"]
     assert instance.status() == S.RUNNING
-    assert scheduler._used_capacity()["x1"] == 2
+    assert scheduler._usage()["x1"]["cores"] == 2
 
 
 def test_new_hosts_get_their_build(tmp_path):
@@ -238,11 +240,11 @@ from experiment.api.work import Experiment, Job, PerHostJob
 
 class Build(PerHostJob):
     def make_job(self, host_name, id, outdir):
-        return Job("builds", outdir, "b", "b", outdir, 1, id)
+        return Job("builds", outdir, "b", "b", outdir, None, id)
 
 build = Build("builds", "build-main", Path("{tmp}/builds"))
 e = Experiment("e", Path("{tmp}/e"))
-e.register_job(Job("e", Path("{tmp}"), "s", "s", Path("{tmp}/e/s"), 1, "sim",
+e.register_job(Job("e", Path("{tmp}"), "s", "s", Path("{tmp}/e/s"), None, "sim",
                    after=[build]))
 """
 

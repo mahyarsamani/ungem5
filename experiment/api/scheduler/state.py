@@ -16,7 +16,7 @@ import time
 
 from pathlib import Path
 
-STATE_VERSION = 1
+STATE_VERSION = 2
 
 
 def runtime_dir() -> Path:

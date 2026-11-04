@@ -28,6 +28,7 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.patch_stdout import patch_stdout
 
 from ..host import remote_message
+from ..resources import format_size
 from ..work import JobStatus
 from ..worker import PROTOCOL_CONFIG
 from .daemon import (
@@ -220,6 +221,13 @@ def build_parser() -> tuple[ConsoleParser, dict[str, ConsoleParser]]:
     p = add("deps", "Show what a job depends on and what depends on it.")
     _arg(p, "job", completer="job")
 
+    p = add(
+        "memory",
+        "Show a job's memory: guess, estimate and why, and past runs.",
+        ["mem"],
+    )
+    _arg(p, "job", completer="job")
+
     p = add("kill", "Kill all jobs of an experiment and remove it.")
     _arg(p, "experiment", completer="experiment")
 
@@ -267,9 +275,14 @@ def build_parser() -> tuple[ConsoleParser, dict[str, ConsoleParser]]:
         help="Remove it now and stop tracking its jobs.",
     )
 
-    p = add("capacity", "Change a host's capacity: +N, -N or =N.", ["c"])
+    p = add("capacity", "Limit the cores and memory jobs may use on a host.", ["c"])
     _arg(p, "host", completer="host")
-    _arg(p, "change")
+    _arg(p, "--cores", help="N, +N or -N, or auto for all the host has.")
+    _arg(
+        p,
+        "--memory",
+        help="A size like 200G, or auto for 90%% of the host's memory.",
+    )
 
     p = add("events", "Show recent scheduler events.")
     _arg(p, "-n", type=int, default=20, help="How many.")
@@ -387,6 +400,29 @@ class ConsoleCompleter(Completer):
 # ---- Output ---------------------------------------------------------------
 
 
+def host_usage(host: dict) -> str:
+    """"3/12 cores, 40G/200G" for a host view."""
+    return (
+        f"{host['cores_used']}/{host['cores']} cores, "
+        f"{format_size(host['memory_used'])}/{format_size(host['memory'])}"
+    )
+
+
+def job_memory(job: dict) -> str:
+    """The memory column of a job view: the estimate (and what it rests
+    on) before it runs, now/reserved while it runs, the peak after."""
+    if job.get("estimate") is not None:
+        return f"~{format_size(job['estimate'])} ({job['estimate_source']})"
+    if job.get("memory_now") is not None:
+        return (
+            f"{format_size(job['memory_now'])}/"
+            f"{format_size(job.get('reserved'))}"
+        )
+    if job.get("memory_peak") is not None:
+        return f"peak {format_size(job['memory_peak'])}"
+    return ""
+
+
 def table(headers: list[str], rows: list[list], max_width: int = 60) -> str:
     rows = [
         [str(cell) if cell is not None else "" for cell in row] for row in rows
@@ -454,7 +490,7 @@ class Console:
             ]
         if kind == "host":
             return [
-                (h["name"], f"{h['state']}, {h['used']}/{h['capacity']}")
+                (h["name"], f"{h['state']}, {host_usage(h)}")
                 for h in snapshot["hosts"]
             ]
         if kind == "job":
@@ -545,7 +581,9 @@ class Console:
                     "domain",
                     "state",
                     "mode",
-                    "used",
+                    "cores",
+                    "memory",
+                    "free now",
                     "jobs",
                     "error",
                 ],
@@ -556,7 +594,10 @@ class Console:
                         h["domain"],
                         h["state"],
                         h["mode"],
-                        f"{h['used']}/{h['capacity']}",
+                        f"{h['cores_used']}/{h['cores']}",
+                        f"{format_size(h['memory_used'])}/"
+                        f"{format_size(h['memory'])}",
+                        format_size(h["memory_available"]),
                         h["jobs"],
                         h["error"] or "",
                     ]
@@ -606,6 +647,7 @@ class Console:
                     "host",
                     "started",
                     "ended",
+                    "memory",
                     "experiment",
                     "command",
                 ],
@@ -617,6 +659,7 @@ class Console:
                         job["host"],
                         format_time(job.get("start_time")),
                         format_time(job.get("end_time")),
+                        job_memory(job),
                         job["experiment"],
                         job["full_command"] if args.full else job["command"],
                     ]
@@ -796,7 +839,7 @@ class Console:
         """Run one command. Returns False when the console should exit."""
         command = args.command
         canonical = {"p": "load", "exps": "experiments", "c": "capacity",
-                     "quit": "exit"}.get(command, command)
+                     "mem": "memory", "quit": "exit"}.get(command, command)
         local = {
             "help": self._help,
             "start": self._start,
@@ -845,7 +888,11 @@ class Console:
         elif canonical == "remove":
             self._execute("remove", host=args.host, force=args.force)
         elif canonical == "capacity":
-            self._execute("capacity", host=args.host, change=args.change)
+            self._execute(
+                "capacity", host=args.host, cores=args.cores, memory=args.memory
+            )
+        elif canonical == "memory":
+            self._execute("memory", job=args.job)
         elif canonical == "stop":
             self._execute("stop", kill_jobs=args.kill_jobs)
             return False

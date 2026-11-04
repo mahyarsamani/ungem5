@@ -18,7 +18,7 @@ from experiment.api.work import Experiment, Job
 for i in range({count}):
     {name}.register_job(Job(
         "{name}", Path("{tmp}"), f"c{{i}}", f"c{{i}}",
-        Path("{tmp}/{name}/{{i}}"), 1, f"{name}-{{i:04d}}",
+        Path("{tmp}/{name}/{{i}}"), None, f"{name}-{{i:04d}}",
     ))
 """
 

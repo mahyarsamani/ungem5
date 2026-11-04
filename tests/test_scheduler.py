@@ -35,6 +35,14 @@ class FakeRoot:
         self._check()
         return "fake"
 
+    def host_resources(self):
+        # NOTE: Plenty of memory, so only cores limit these tests.
+        self._check()
+        return 64, 1 << 40, 1 << 40
+
+    def memory_trace(self, outdir):
+        return b""
+
     def launch_job(self, job_id, cwd, command, outdir, files, dumps):
         self._check()
         if job_id in self.fail_launch:
@@ -45,7 +53,7 @@ class FakeRoot:
     def job_statuses(self, outdirs):
         self._check()
         return tuple(
-            (self.status.get(outdir, "missing"), None, None)
+            (self.status.get(outdir, "missing"), None, None, None, None, None)
             for outdir in outdirs
         )
 
@@ -89,7 +97,7 @@ def make_experiment(name: str, count: int, tmp_path: Path) -> Experiment:
                 f"cmd{i}",
                 f"cmd{i}",
                 tmp_path / name / str(i),
-                1,
+                None,
                 f"{name}-{i:04d}",
             )
         )
@@ -251,12 +259,12 @@ def test_commands_from_other_threads(tmp_path):
     thread = threading.Thread(target=scheduler.run)
     thread.start()
     try:
-        assert scheduler.call("capacity", host="h", change="+3") == [
-            "host h capacity is now 5"
+        assert scheduler.call("capacity", host="h", cores="+3") == [
+            "host h: 5 core(s), 922G for jobs"
         ]
         with pytest.raises(CommandError):
             scheduler.call("kill", experiment="nope")
-        assert scheduler.snapshot().hosts[0]["capacity"] == 5
+        assert scheduler.snapshot().hosts[0]["cores"] == 5
     finally:
         scheduler.stop()
         thread.join(5)
@@ -278,7 +286,7 @@ def test_watcher_retries_then_gives_up(tmp_path):
 
     root.launch_job = count_launch
     root.job_statuses = lambda outdirs: tuple(
-        (root.status.get(o, "missing"), 1, "watcher: flaky", None, None)
+        (root.status.get(o, "missing"), 1, "watcher: flaky", None, None, None)
         for o in outdirs
     )
     scheduler._tick()
@@ -327,7 +335,7 @@ class BrokenCheckJob(Job):
 
 def make_job(cls, name, tmp_path):
     return cls(
-        "e", tmp_path, name, name, tmp_path / "e" / name, 1, f"{name}-id"
+        "e", tmp_path, name, name, tmp_path / "e" / name, None, f"{name}-id"
     )
 
 
@@ -360,7 +368,7 @@ def test_start_and_end_times_come_from_the_worker(tmp_path):
     root = FakeRoot()
     times = {}
     root.job_statuses = lambda outdirs: tuple(
-        (root.status.get(o, "missing"), 0, None, *times.get(o, (None, None)))
+        (root.status.get(o, "missing"), 0, None, *times.get(o, (None, None)), None)
         for o in outdirs
     )
     experiment = make_experiment("e", 1, tmp_path)

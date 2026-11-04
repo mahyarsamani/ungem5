@@ -29,8 +29,14 @@ from ..host import (
     JobError,
     job_status_from_worker,
 )
+from ..memory import Estimate, MemoryHistory
+from ..resources import format_size, parse_size
 from ..work import Experiment, Job, JobStatus, PerHostJob
 from .state import StateStore
+
+# NOTE: What a job nobody knows anything about may use.
+DEFAULT_MEMORY = 8 << 30
+MEMORY_HISTORY_FILE = "memory.sqlite"
 
 
 class CommandError(Exception):
@@ -166,6 +172,7 @@ class Scheduler:
         polling_secs: float = 1.0,
         store: StateStore | None = None,
         logger: logging.Logger | None = None,
+        default_memory: int | str = DEFAULT_MEMORY,
     ) -> None:
         self._name = name
         self._polling_secs = polling_secs
@@ -173,6 +180,15 @@ class Scheduler:
         self._logger = logger or logging.getLogger(f"{name}.scheduler")
         self._events = EventLog(self._logger)
         self._info: dict = {"name": name, "started_at": time.time()}
+        self._memory = MemoryHistory(
+            store.directory() / MEMORY_HISTORY_FILE if store else None,
+            parse_size(default_memory),
+        )
+        # NOTE: Jobs and memory reserved on a job's host when it launched,
+        # for its memory record; lost on a restart.
+        self._launch_context: dict[str, tuple[int, int]] = dict()
+        # NOTE: Estimates of queued jobs, made once per tick.
+        self._estimates: dict[str, Estimate] = dict()
 
         self._hosts: dict[str, Host] = dict()
         self._host_mode: dict[str, HostMode] = dict()
@@ -217,6 +233,7 @@ class Scheduler:
             "undrain": self._cmd_undrain,
             "remove": self._cmd_remove,
             "capacity": self._cmd_capacity,
+            "memory": self._cmd_memory,
             "signal": self._cmd_signal,
             "reset": self._cmd_reset,
             "stop": self._cmd_stop,
@@ -351,12 +368,19 @@ class Scheduler:
         for host in self._hosts.values():
             host.disconnect()
         self._connect_pool.shutdown(wait=False, cancel_futures=True)
+        self._memory.close()
         self._events.info("Scheduler stopped.")
 
     def _tick(self) -> None:
+        self._estimates.clear()
         self._reconnect_hosts()
         for host in list(self._hosts.values()):
             if host.up():
+                try:
+                    host.refresh_resources()
+                except HostUnreachable as e:
+                    self._host_lost(host, e)
+                    continue
                 self._poll_host(host)
         self._process_killing()
         self._process_host_removal()
@@ -372,20 +396,69 @@ class Scheduler:
             if job.host() == host_name and job.status().active()
         ]
 
-    def _demand(self, job: Job, host_name: str | None) -> int:
-        """Slots `job` takes on `host_name`. A job pinned to a host (e.g.
+    def _cores(self, job: Job, host_name: str | None) -> int:
+        """Cores `job` takes on `host_name`. A job pinned to a host (e.g.
         a per-host build) takes at most the whole host."""
         host = self._hosts.get(host_name or "")
         if job.pinned_host() is not None and host is not None:
-            return min(job.demand(), host.max_capacity())
-        return job.demand()
+            return min(job.cores(), host.cores())
+        return job.cores()
 
-    def _used_capacity(self) -> dict[str, int]:
-        used = {name: 0 for name in self._hosts}
+    @staticmethod
+    def _held(job: Job) -> int:
+        """Memory a running job holds: its reservation, or more if it
+        already uses more."""
+        return max(job.reserved() or 0, job.memory_now() or 0)
+
+    def _usage(self) -> dict[str, dict]:
+        """Per host: cores and memory held by its active jobs, how many
+        jobs, and how much reserved memory they haven't touched yet."""
+        usage = {
+            name: {"cores": 0, "memory": 0, "jobs": 0, "untouched": 0}
+            for name in self._hosts
+        }
         for job in self._jobs.values():
-            if job.status().active() and job.host() in used:
-                used[job.host()] += self._demand(job, job.host())
-        return used
+            if job.status().active() and job.host() in usage:
+                used = usage[job.host()]
+                used["cores"] += self._cores(job, job.host())
+                used["memory"] += self._held(job)
+                used["jobs"] += 1
+                used["untouched"] += max(
+                    0, (job.reserved() or 0) - (job.memory_now() or 0)
+                )
+        return usage
+
+    def _estimate(self, job: Job) -> Estimate:
+        estimate = self._estimates.get(job.id())
+        if estimate is None:
+            estimate = self._memory.estimate(job)
+            self._estimates[job.id()] = estimate
+        return estimate
+
+    def _fits(self, job: Job, host: Host, used: dict) -> bool:
+        """Whether `job` fits next to what `used` holds on `host`. Memory
+        must fit in the host's limit and in what the machine has free,
+        less what running jobs reserved but haven't used yet."""
+        if used["cores"] + self._cores(job, host.name()) > host.cores():
+            return False
+        memory = self._estimate(job).memory
+        limit = host.memory()
+        if limit is not None and used["memory"] + memory > limit:
+            return False
+        available = host.available_memory()
+        return available is None or memory <= available - used["untouched"]
+
+    def _too_big(self, job: Job) -> bool:
+        """No host could ever take `job`, even empty."""
+        hosts = [h for h in self._hosts.values() if self._placeable(job, h)]
+        if not hosts:
+            return False
+        memory = self._estimate(job).memory
+        return all(
+            job.cores() > h.cores() and job.pinned_host() is None
+            or (h.memory() is not None and memory > h.memory())
+            for h in hosts
+        )
 
     def _update_readiness(self) -> None:
         """Mark each pending job with dependencies queued, waiting or
@@ -515,7 +588,7 @@ class Scheduler:
         except JobError as e:
             self._events.error(f"Polling {host.name()} failed: {e}")
             return
-        for job, (status, returncode, message, start, end) in zip(
+        for job, (status, returncode, message, start, end, memory) in zip(
             jobs, results
         ):
             before = job.status()
@@ -523,6 +596,12 @@ class Scheduler:
                 start is not None or end is not None
             ):
                 job.set_times(start, end)
+                self._dirty = True
+            if memory is not None and tuple(memory) != (
+                job.memory_now(),
+                job.memory_peak(),
+            ):
+                job.set_memory(*memory)
                 self._dirty = True
             if status == "missing":
                 if before == JobStatus.UNKNOWN:
@@ -542,6 +621,7 @@ class Scheduler:
                 self._dirty = True
                 continue
             if status == "retry":
+                self._record_memory(job, host, "retry")
                 self._retry(job, host, message or "watcher asked to retry")
                 continue
             new = job_status_from_worker(status)
@@ -551,6 +631,8 @@ class Scheduler:
             if new.terminal() and job.end_time() is None:
                 # NOTE: No exit record (e.g. SIGKILL): when we noticed.
                 job.set_times(None, time.time())
+            if new.terminal():
+                self._record_memory(job, host, new.value)
             self._dirty = True
             if new == JobStatus.RUNNING:
                 self._events.info(
@@ -571,6 +653,32 @@ class Scheduler:
                     f"Job {job.id()[:8]} ({job.shorthand_command()}) was killed"
                     + (f": {message}" if message else ".")
                 )
+
+    def _record_memory(self, job: Job, host: Host, outcome: str) -> None:
+        """Add a run that ended to the memory history."""
+        if job.memory_peak() is None:
+            return
+        try:
+            trace = host.memory_trace(job)
+        except (HostUnreachable, JobError) as e:
+            self._logger.info(f"No memory trace for {job.id()[:8]}: {e}")
+            trace = []
+        co_jobs, co_reserved = self._launch_context.pop(
+            job.id(), (None, None)
+        )
+        try:
+            self._memory.record(
+                job, host.name(), outcome, trace, co_jobs, co_reserved
+            )
+        except Exception:
+            self._logger.exception(f"Recording memory of {job.id()[:8]}.")
+            return
+        reserved = job.reserved()
+        if reserved and job.memory_peak() > reserved:
+            self._events.warn(
+                f"Job {job.id()[:8]} used {format_size(job.memory_peak())}, "
+                f"more than the {format_size(reserved)} reserved for it."
+            )
 
     def _retry(self, job: Job, host: Host, message: str) -> None:
         self._dirty = True
@@ -660,6 +768,8 @@ class Scheduler:
             )
 
     def _forget_job(self, job: Job) -> None:
+        self._memory.forget(job.id())
+        self._launch_context.pop(job.id(), None)
         self._jobs.pop(job.id(), None)
         self._job_origin.pop(job.id(), None)
         self._deps.pop(job.id(), None)
@@ -683,14 +793,15 @@ class Scheduler:
         self._dirty = True
 
     def _schedule(self) -> None:
-        experiments = [
-            experiment
+        queued = [
+            job
             for name, experiment in self._experiments.items()
             if name not in self._killing
+            for job in experiment.queued()
         ]
-        used = self._used_capacity()
+        usage = self._usage()
         progress = True
-        while progress:
+        while progress and queued:
             progress = False
             hosts = sorted(
                 (
@@ -698,47 +809,61 @@ class Scheduler:
                     for name, host in self._hosts.items()
                     if host.up() and self._host_mode[name] == HostMode.ACTIVE
                 ),
-                key=lambda host: host.max_capacity() - used[host.name()],
+                key=lambda host: host.cores() - usage[host.name()]["cores"],
                 reverse=True,
             )
             for host in hosts:
-                free = host.max_capacity() - used[host.name()]
-                def demand(job, host=host):
-                    return self._demand(job, host.name())
-
+                used = usage[host.name()]
+                # NOTE: Largest first (cores, then memory), so big jobs
+                # aren't starved by small ones filling every host.
                 job = max(
                     (
-                        candidate
-                        for candidate in (
-                            experiment.candidate(
-                                free,
-                                lambda job, host=host: self._placeable(
-                                    job, host
-                                ),
-                                demand,
-                            )
-                            for experiment in experiments
-                        )
-                        if candidate is not None
+                        job
+                        for job in queued
+                        if self._placeable(job, host)
+                        and self._fits(job, host, used)
                     ),
-                    key=demand,
+                    key=lambda job, host=host: (
+                        self._cores(job, host.name()),
+                        self._estimate(job).memory,
+                    ),
                     default=None,
                 )
                 if job is None:
                     continue
                 progress = True
-                self._launch(host, job)
+                queued.remove(job)
+                memory = self._estimate(job).memory
+                self._launch_context[job.id()] = (
+                    used["jobs"],
+                    used["memory"],
+                )
+                self._launch(host, job, memory)
                 if job.status().active():
-                    used[host.name()] += demand(job)
+                    used["cores"] += self._cores(job, host.name())
+                    used["memory"] += memory
+                    used["jobs"] += 1
+                    used["untouched"] += memory
                 if not host.up():
                     break
 
     def _job_view(self, job: Job) -> dict:
         view = job.view()
+        if job.status().pending():
+            estimate = self._estimate(job)
+            view["estimate"] = estimate.memory
+            view["estimate_source"] = estimate.source
+            view["estimate_detail"] = estimate.detail
         if job.status() == JobStatus.QUEUED and not any(
             self._placeable(job, host) for host in self._hosts.values()
         ):
             view["message"] = "no compatible host"
+        elif job.status() == JobStatus.QUEUED and self._too_big(job):
+            view["message"] = (
+                f"needs {job.cores()} core(s) and "
+                f"{format_size(self._estimate(job).memory)}, more than any "
+                "compatible host offers"
+            )
         plain, per_host = self._deps.get(job.id(), ([], []))
         view["depends_on"] = list(plain)
         view["depends_on_per_host"] = list(per_host)
@@ -759,8 +884,8 @@ class Scheduler:
                 )
             return False
 
-    def _launch(self, host: Host, job: Job) -> None:
-        job.assign(host.name())
+    def _launch(self, host: Host, job: Job, memory: int) -> None:
+        job.assign(host.name(), memory)
         self._dirty = True
         # NOTE: Write-ahead: if we die during the launch, the next start
         # knows to ask this host about the job instead of launching it again.
@@ -779,11 +904,12 @@ class Scheduler:
             job.set_status(JobStatus.RUNNING)
             self._events.info(
                 f"Launched job {job.id()[:8]} ({job.shorthand_command()}) "
-                f"on {host.name()}."
+                f"on {host.name()} with {format_size(memory)} reserved "
+                f"({self._estimate(job).source})."
             )
 
     def _publish(self) -> None:
-        used = self._used_capacity()
+        usage = self._usage()
         hosts = tuple(
             {
                 "name": name,
@@ -791,9 +917,13 @@ class Scheduler:
                 "domain": host.domain(),
                 "state": str(host.state()),
                 "mode": str(self._host_mode[name]),
-                "capacity": host.max_capacity(),
-                "used": used[name],
-                "jobs": len(self._active_jobs(name)),
+                "cores": host.cores(),
+                "cores_used": usage[name]["cores"],
+                "memory": host.memory(),
+                "memory_used": usage[name]["memory"],
+                "memory_available": host.available_memory(),
+                "limits": host.limits(),
+                "jobs": usage[name]["jobs"],
                 "error": host.last_error(),
             }
             for name, host in self._hosts.items()
@@ -905,7 +1035,11 @@ class Scheduler:
                     )
                     continue
                 self._add_host(host)
-            self._hosts[name].set_capacity(spec["max_capacity"])
+            # NOTE: Limits changed with `capacity` outlive a restart.
+            self._hosts[name].set_limits(
+                "auto" if spec["cores"] is None else spec["cores"],
+                "auto" if spec["memory"] is None else spec["memory"],
+            )
             self._host_mode[name] = HostMode(saved["mode"])
 
         for name in data.get("killing", []):
@@ -1202,17 +1336,70 @@ class Scheduler:
             "job(s) finish"
         ]
 
-    def _cmd_capacity(self, host: str, change: str) -> list[str]:
+    def _cmd_capacity(
+        self, host: str, cores: str | None = None, memory: str | None = None
+    ) -> list[str]:
+        """Limit what jobs may use on `host`: cores as N, +N or -N, memory
+        as a size like 200G; "auto" for what the worker reports."""
         target = self._host(host)
+        if cores is None and memory is None:
+            raise CommandError("give --cores, --memory or both")
         try:
-            if change.startswith(("+", "-")):
-                value = target.max_capacity() + int(change)
-            else:
-                value = int(change.lstrip("="))
-        except ValueError:
-            raise CommandError(f"capacity must be +N, -N or =N, not {change!r}")
-        target.set_capacity(value)
-        return [f"host {host} capacity is now {target.max_capacity()}"]
+            if cores is not None and cores.startswith(("+", "-")):
+                cores = str(max(0, target.cores() + int(cores)))
+            target.set_limits(cores, memory)
+        except (TypeError, ValueError) as e:
+            raise CommandError(f"bad limit: {e}")
+        memory_limit = target.memory()
+        return [
+            f"host {host}: {target.cores()} core(s), "
+            + (
+                f"{format_size(memory_limit)} for jobs"
+                if memory_limit is not None
+                else "memory unknown until its worker reports it"
+            )
+        ]
+
+    def _cmd_memory(self, job: str) -> list[str]:
+        """A job's memory: the guess, the estimate and why, what it holds,
+        and its recorded runs."""
+        target = self._resolve_job(job)
+        guess = target.memory_guess()
+        lines = [
+            f"{target.id()[:12]} ({target.shorthand_command()}): "
+            f"{target.cores()} core(s), guess "
+            + (format_size(guess) if guess else "none")
+        ]
+        if target.status().pending():
+            estimate = self._estimate(target)
+            lines.append(
+                f"estimate {format_size(estimate.memory)} "
+                f"({estimate.source}: {estimate.detail})"
+            )
+        else:
+            lines.append(
+                f"{target.status()}: reserved "
+                f"{format_size(target.reserved())}, now "
+                f"{format_size(target.memory_now())}, peak "
+                f"{format_size(target.memory_peak())}"
+            )
+        runs = self._memory.runs(target.id())
+        if runs:
+            lines.append(f"{len(runs)} recorded run(s), newest first:")
+        for run in runs[:10]:
+            started = (
+                time.strftime("%Y-%m-%d %H:%M", time.localtime(run["start_time"]))
+                if run["start_time"]
+                else "?"
+            )
+            lines.append(
+                f"  {started} on {run['host']}: {run['outcome']}, peak "
+                f"{format_size(run['peak'])}, reserved "
+                f"{format_size(run['reserved'])}, "
+                f"{run['co_jobs'] if run['co_jobs'] is not None else '?'} "
+                "other job(s) on the host"
+            )
+        return lines
 
     def _cmd_signal(self, jobs: list[str], signal: str) -> list[str]:
         if signal not in self.SIGNALS:

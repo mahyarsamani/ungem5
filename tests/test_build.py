@@ -13,6 +13,7 @@ import pytest
 
 import experiment.api.build as build
 from experiment.api.build import Builder, BuildSpec
+from experiment.api.resources import Resources
 from experiment.cli.build import _process_build_args, parse_build_args
 from experiment.common.gem5_work import gem5ProjectConfiguration
 
@@ -159,15 +160,18 @@ def test_worker_entry_point_builds_from_a_spec(project, tmp_path, fake_scons):
 def test_gem5_build_jobs_and_experiments(project):
     from experiment.common.gem5_work import gem5Build, gem5Experiment, gem5Job
 
-    main = gem5Build(project, "main", threads=8, isas="X86")
+    main = gem5Build(project, "main", Resources(1, "6G"), 8, isas="X86")
     paths = project.path_config()
     assert main.id() == "build-p-main"
     instance = main.instance("perle")
     assert instance.id() == "build-p-main@perle"
-    assert instance.pinned_host() == "perle" and instance.demand() == 8
+    # NOTE: One core by default, whatever the threads.
+    assert instance.pinned_host() == "perle" and instance.cores() == 1
+    assert instance.memory_guess() == 6 << 30
+    assert gem5Build(project, "main", Resources(8)).instance("x").cores() == 8
     assert instance.outdir() == paths.gem5_out_base_dir() / "builds" / "main" / "perle"
     assert "experiment.api.build" in instance.command()
-    (_, content, spec_path), = instance.dumps()
+    (_, content, spec_path), _process = instance.dumps()
     assert BuildSpec(**json.loads(content)) == main.spec()
     assert spec_path == instance.outdir() / ".job" / "build.json"
 
@@ -176,8 +180,10 @@ def test_gem5_build_jobs_and_experiments(project):
         build=main,
     )
     assert sweep.gem5_path() == main.binary()
-    sim = gem5Job(sweep, 1, paths.project_dir() / "run.py", 4)
+    sim = gem5Job(sweep, None, paths.project_dir() / "run.py", 4)
     assert sim.parents() == [main]
+    with pytest.raises(TypeError, match="Resources"):
+        gem5Job(sweep, 1, paths.project_dir() / "run.py", 4)
     with pytest.raises(ValueError, match="gem5_path or build"):
         gem5Experiment("x", paths.project_dir(), outdir=paths.gem5_out_base_dir())
 

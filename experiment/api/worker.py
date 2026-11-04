@@ -23,11 +23,14 @@ from .runner import (
     FILES_FILE,
     JOB_DIR,
     LAUNCH_FILE,
+    MEMORY_FILE,
+    MEMORY_TRACE_FILE,
     read_json,
     write_json_atomic,
 )
 
 MAX_READ = 1 << 20
+MAX_TRACE = 8 << 20
 ALLOWED_SIGNALS = {
     int(signal_module.SIGTERM),
     int(signal_module.SIGINT),
@@ -67,12 +70,24 @@ def _leader_alive(launch: dict) -> bool:
         return True
 
 
-Status = tuple[str, int | None, str | None, float | None, float | None]
+Memory = tuple[int | None, int | None] | None
+Status = tuple[
+    str, int | None, str | None, float | None, float | None, Memory
+]
+
+
+def _sampled_memory(job_dir: Path) -> Memory:
+    latest = read_json(job_dir / MEMORY_FILE)
+    if latest is None:
+        return None
+    return latest.get("rss"), latest.get("peak")
 
 
 def resolve_status(outdir: Path) -> Status:
-    """Returns (status, returncode, message, start_time, end_time) for the
-    job in `outdir`. Times are epoch seconds on this machine's clock.
+    """Returns (status, returncode, message, start_time, end_time, memory)
+    for the job in `outdir`. Times are epoch seconds on this machine's
+    clock; memory is (bytes resident now, peak bytes so far), with None
+    for "now" once the job ended, or None if nothing was measured.
 
     status is one of "missing", "running", "exited", "failed", "killed",
     and "retry" (the job's watcher asked for it to be queued again).
@@ -80,41 +95,48 @@ def resolve_status(outdir: Path) -> Status:
     job_dir = _job_dir(outdir)
     launch = read_json(job_dir / LAUNCH_FILE)
     if launch is None:
-        return "missing", None, None, None, None
+        return "missing", None, None, None, None, None
     start = launch.get("start_time")
 
     def from_exit(record: dict) -> Status:
         rc = record.get("returncode")
         end = record.get("end_time")
+        peak = (record.get("memory") or {}).get("peak")
+        memory = (None, peak) if peak is not None else None
         verdict = record.get("watcher")
         if verdict:
             status = "retry" if verdict["action"] == "retry" else "failed"
-            return status, rc, f"watcher: {verdict['message']}", start, end
+            message = f"watcher: {verdict['message']}"
+            return status, rc, message, start, end, memory
         if rc == 0:
-            return "exited", rc, None, start, end
+            return "exited", rc, None, start, end, memory
         if rc is not None and rc < 0 and -rc in record.get(
             "signals_received", []
         ):
-            return "killed", rc, f"stopped by signal {-rc}", start, end
+            message = f"stopped by signal {-rc}"
+            return "killed", rc, message, start, end, memory
         if rc is not None and rc < 0:
-            return "failed", rc, f"terminated by signal {-rc}", start, end
-        return "failed", rc, record.get("error"), start, end
+            message = f"terminated by signal {-rc}"
+            return "failed", rc, message, start, end, memory
+        return "failed", rc, record.get("error"), start, end, memory
 
     record = read_json(job_dir / EXIT_FILE)
     if record is not None:
         return from_exit(record)
     if _leader_alive(launch):
-        return "running", None, None, start, None
+        return "running", None, None, start, None, _sampled_memory(job_dir)
     # NOTE: The runner may have written exit.json right after our first look.
     record = read_json(job_dir / EXIT_FILE)
     if record is not None:
         return from_exit(record)
+    sampled = _sampled_memory(job_dir)
     return (
         "killed",
         None,
         "ended without an exit record (e.g. SIGKILL)",
         start,
         None,
+        (None, sampled[1]) if sampled else None,
     )
 
 
@@ -135,6 +157,28 @@ class Worker(rpyc.Service):
     def exposed_ping(self) -> str:
         return os.uname().nodename
 
+    def exposed_host_resources(self) -> tuple:
+        """(cores, total memory, available memory) of this machine, in
+        logical CPUs and bytes."""
+        memory = psutil.virtual_memory()
+        return os.cpu_count() or 1, memory.total, memory.available
+
+    def exposed_memory_trace(self, outdir: str) -> bytes:
+        """The job's memory samples, one JSON object per line (the last
+        MAX_TRACE bytes of them)."""
+        path = _job_dir(Path(outdir)) / MEMORY_TRACE_FILE
+        try:
+            with open(path, "rb") as f:
+                size = f.seek(0, os.SEEK_END)
+                f.seek(max(0, size - MAX_TRACE))
+                data = f.read()
+        except FileNotFoundError:
+            return b""
+        if size > MAX_TRACE:
+            # NOTE: Drop the partial first line.
+            data = data.partition(b"\n")[2]
+        return data
+
     def exposed_launch_job(
         self,
         job_id: str,
@@ -154,7 +198,7 @@ class Worker(rpyc.Service):
         status = resolve_status(out)[0]
         if status == "running":
             raise RuntimeError(f"a job is already running in {out}")
-        for name in (LAUNCH_FILE, EXIT_FILE):
+        for name in (LAUNCH_FILE, EXIT_FILE, MEMORY_FILE, MEMORY_TRACE_FILE):
             (job_dir / name).unlink(missing_ok=True)
 
         allowed = {}

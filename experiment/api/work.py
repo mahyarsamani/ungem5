@@ -4,7 +4,9 @@ import json
 
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Iterable, Sequence, Tuple
+from typing import TYPE_CHECKING, Iterable, Sequence, Tuple
+
+from .resources import Resources
 
 if TYPE_CHECKING:
     from .host import Host
@@ -65,13 +67,15 @@ class Job:
         command: str,
         shorthand_command: str,
         outdir: Path,
-        demand: int,
+        resources: Resources | None,
         id: str,
         aux_files: Sequence[Tuple[str, Path]] = (),
         dumps: Sequence[Tuple[str, str, Path]] = (),
         after: Iterable["Job | PerHostJob"] = (),
     ) -> None:
         """
+        :param resources: cores and a memory guess; None is one core and
+            no guess.
         :param aux_files: (label, path) of extra output files to show on the
             dashboard, e.g. ("stats", outdir / "stats.txt"). Paths must be
             inside `outdir`.
@@ -84,8 +88,10 @@ class Job:
         self._command = command
         self._shorthand_command = shorthand_command
         self._outdir = Path(outdir)
-        self._demand = demand
+        self._resources = Resources.of(resources)
         self._id = id
+        if not (isinstance(self.nice, int) and 0 <= self.nice <= 19):
+            raise ValueError(f"{id}: nice must be 0 to 19, not {self.nice!r}")
         self._aux_files = tuple(aux_files)
         self._dumps = tuple(dumps)
 
@@ -99,6 +105,11 @@ class Job:
         self._end_time: float | None = None
         # NOTE: Requeues asked for by the watcher since the last `reset`.
         self._retries = 0
+        # NOTE: Bytes the scheduler set aside for this run, and what the
+        # runner last measured (now and peak so far).
+        self._reserved: int | None = None
+        self._memory_now: int | None = None
+        self._memory_peak: int | None = None
 
         self._parents: list[Job | PerHostJob] = []
         # NOTE: Set on the instances of a PerHostJob: the only host they
@@ -135,6 +146,10 @@ class Job:
     watch_interval = 60
     watch_timeout = 60
     max_retries = 3
+    # NOTE: Process settings; override in a subclass. The job runs with
+    # this nice value (0 to 19), and its memory is sampled this often.
+    nice = 0
+    memory_interval = 120
 
     def compatible_with_host(self, host: "Host") -> bool:
         """Whether this job may run on `host`. Override to restrict it,
@@ -183,8 +198,29 @@ class Job:
     def id(self) -> str:
         return self._id
 
-    def demand(self) -> int:
-        return self._demand
+    def resources(self) -> Resources:
+        return self._resources
+
+    def cores(self) -> int:
+        return self._resources.cores
+
+    def memory_guess(self) -> int | None:
+        return self._resources.memory
+
+    def features(self) -> dict:
+        """What decides this job's memory use, for the scheduler's estimate.
+
+        Jobs with equal features are expected to peak alike, so a rerun
+        reserves what the last runs used. Values must be JSON. Override
+        to describe your job better (gem5Job does); never include the
+        host or anything that changes between identical runs.
+        """
+        return {"experiment": self._experiment, "command": self._command}
+
+    def memory_group(self) -> str:
+        """Jobs that share this tend to be alike in size, so the scheduler
+        uses their records to correct your `memory` guess."""
+        return self._experiment
 
     def files(self) -> Tuple[Tuple[str, Path], ...]:
         job_dir = self._outdir / ".job"
@@ -205,15 +241,19 @@ class Job:
         )
 
     def dumps(self) -> Tuple[Tuple[str, str, Path], ...]:
+        job_dir = self._outdir / ".job"
+        process = json.dumps(
+            {"nice": self.nice, "memory_interval": self.memory_interval}
+        )
+        dumps = (*self._dumps, ("process", process, job_dir / "process.json"))
         script = self.watcher()
         if script is None:
-            return self._dumps
-        job_dir = self._outdir / ".job"
+            return dumps
         config = json.dumps(
             {"interval": self.watch_interval, "timeout": self.watch_timeout}
         )
         return (
-            *self._dumps,
+            *dumps,
             ("watcher", script, job_dir / "watcher"),
             ("watcher config", config, job_dir / "watcher.json"),
         )
@@ -235,6 +275,21 @@ class Job:
 
     def end_time(self) -> float | None:
         return self._end_time
+
+    def reserved(self) -> int | None:
+        return self._reserved
+
+    def memory_now(self) -> int | None:
+        return self._memory_now
+
+    def memory_peak(self) -> int | None:
+        return self._memory_peak
+
+    def set_memory(self, now: int | None, peak: int | None) -> None:
+        """What the runner measured; `now` is None once the job ended."""
+        self._memory_now = now
+        if peak is not None:
+            self._memory_peak = max(peak, self._memory_peak or 0)
 
     def set_status(
         self,
@@ -259,11 +314,15 @@ class Job:
         self._message = None
         self._start_time = None
         self._end_time = None
+        self._reserved = None
+        self._memory_now = None
+        self._memory_peak = None
 
-    def assign(self, host_name: str) -> None:
+    def assign(self, host_name: str, reserved: int | None = None) -> None:
         self._host_name = host_name
         self._status = JobStatus.LAUNCHING
         self._clear_run()
+        self._reserved = reserved
 
     def set_pending(self, status: JobStatus, reason: str | None) -> None:
         """Queued, waiting or blocked, as its dependencies allow."""
@@ -310,6 +369,9 @@ class Job:
             "start_time": self._start_time,
             "end_time": self._end_time,
             "retries": self._retries,
+            "reserved": self._reserved,
+            "memory_now": self._memory_now,
+            "memory_peak": self._memory_peak,
         }
 
     def restore_runtime_state(self, state: dict) -> None:
@@ -325,6 +387,9 @@ class Job:
         self._start_time = state.get("start_time")
         self._end_time = state.get("end_time")
         self._retries = state.get("retries", 0)
+        self._reserved = state.get("reserved")
+        self._memory_now = state.get("memory_now")
+        self._memory_peak = state.get("memory_peak")
 
     def view(self) -> dict:
         return {
@@ -332,7 +397,12 @@ class Job:
             "experiment": self._experiment,
             "command": self._shorthand_command,
             "full_command": self.display_command(),
-            "demand": self._demand,
+            "cores": self.cores(),
+            "memory_guess": self.memory_guess(),
+            "reserved": self._reserved,
+            "memory_now": self._memory_now,
+            "memory_peak": self._memory_peak,
+            "nice": self.nice,
             "host": self._host_name or "",
             "status": self._status.value,
             "status_color": self._status.color(),
@@ -444,24 +514,12 @@ class Experiment:
     def job(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
 
-    def candidate(
-        self,
-        capacity: int,
-        accepts: Callable[[Job], bool] = lambda job: True,
-        demand: Callable[[Job], int] = lambda job: job.demand(),
-    ) -> Job | None:
-        """The largest queued job that fits in `capacity` and `accepts`."""
-        return max(
-            (
-                job
-                for job in self._jobs.values()
-                if job.status() == JobStatus.QUEUED
-                and demand(job) <= capacity
-                and accepts(job)
-            ),
-            key=demand,
-            default=None,
-        )
+    def queued(self) -> list[Job]:
+        return [
+            job
+            for job in self._jobs.values()
+            if job.status() == JobStatus.QUEUED
+        ]
 
     def __str__(self) -> str:
         return (

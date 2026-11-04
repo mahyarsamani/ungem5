@@ -1,17 +1,66 @@
 import json
 import platform
 import shlex
+import subprocess
+import time
 
 from argparse import Namespace
+from dataclasses import asdict
 from enum import Enum
 from hashlib import sha256
 from pathlib import Path
 from typing import List, Optional
 
+from ..api.resources import Resources
 from ..api.runner import JOB_DIR
 from ..api.simulate import RunSpec
 from ..api.work import Job, Experiment, PerHostJob, ProjectConfiguration
 from .log import warn
+
+SOURCE_IDENTITY_SECS = 60.0
+_source_identities: dict[str, tuple[float, dict]] = {}
+
+
+def source_identity(source_dir: Path) -> dict:
+    """The gem5 source a build would compile right now: commit, and a hash
+    of uncommitted changes. Cached for SOURCE_IDENTITY_SECS, since a load
+    asks once per job."""
+    key = str(source_dir)
+    cached = _source_identities.get(key)
+    if cached is not None and time.time() - cached[0] < SOURCE_IDENTITY_SECS:
+        return cached[1]
+
+    def git(*args) -> str | None:
+        try:
+            result = subprocess.run(
+                ["git", "-C", key, *args],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return result.stdout if result.returncode == 0 else None
+
+    commit = git("rev-parse", "HEAD")
+    status = git("status", "--porcelain", "--untracked-files=no")
+    identity = {
+        "commit": commit.strip() if commit else None,
+        "changes": (
+            sha256(git("diff", "HEAD").encode()).hexdigest()[:16]
+            if status
+            else None
+        ),
+    }
+    _source_identities[key] = (time.time(), identity)
+    return identity
+
+
+def _file_digest(path: Path) -> str | None:
+    try:
+        return sha256(path.read_bytes()).hexdigest()[:16]
+    except OSError:
+        return None
 
 
 def _is_valid(args, attr):
@@ -180,6 +229,8 @@ def _literal(value) -> str:
         return f"Path({str(value)!r})"
     if isinstance(value, OtherValues):
         return f"OtherValues.{value.name}"
+    if isinstance(value, Resources):
+        return f"Resources(cores={value.cores}, memory={value.memory!r})"
     return repr(value)
 
 
@@ -190,6 +241,10 @@ class gem5Job(Job):
     `--key-name value` (or just `--key-name` for OtherValues.Store_Const).
     The run is described by a RunSpec saved as <outdir>/.job/run.json;
     `helper run --spec <that file>` reruns it by hand.
+
+    `resources` is a Resources (one core, and your guess of the peak
+    memory) or None. The scheduler learns memory per (binary, build, gem5
+    source, script content, arguments, input file sizes); see `features`.
     """
 
     @staticmethod
@@ -234,7 +289,7 @@ class gem5Job(Job):
     @staticmethod
     def write_constructor(
         experiment: "gem5Experiment",
-        demand: int,
+        resources: Resources,
         run_script_path: Path,
         *args,
         **kwargs,
@@ -242,7 +297,7 @@ class gem5Job(Job):
         """Source for a script that recreates this job."""
         call_args = [
             "experiment",
-            repr(demand),
+            _literal(resources),
             _literal(Path(run_script_path)),
             *(_literal(arg) for arg in args),
             *(f"{key}={_literal(value)}" for key, value in kwargs.items()),
@@ -250,6 +305,7 @@ class gem5Job(Job):
         body = "".join(f"    {arg},\n" for arg in call_args)
         return (
             "from pathlib import Path\n\n"
+            "from experiment.api.resources import Resources\n"
             "from experiment.common.gem5_work import (\n"
             "    OtherValues,\n"
             "    gem5Experiment,\n"
@@ -268,11 +324,12 @@ class gem5Job(Job):
     def __init__(
         self,
         experiment: "gem5Experiment",
-        demand: int,
+        resources: Resources | None,
         run_script_path: Path,
         *args,
         **kwargs,
     ):
+        resources = Resources.of(resources)
         run_script_path = Path(run_script_path)
         id = calculate_hash(
             [
@@ -303,7 +360,7 @@ class gem5Job(Job):
                 experiment.gem5_path(), run_script_path, *args, **kwargs
             ),
             outdir,
-            demand,
+            resources,
             id,
             aux_files=[
                 ("stats", outdir / "stats.txt"),
@@ -313,7 +370,7 @@ class gem5Job(Job):
                 (
                     "constructor",
                     gem5Job.write_constructor(
-                        experiment, demand, run_script_path, *args, **kwargs
+                        experiment, resources, run_script_path, *args, **kwargs
                     ),
                     outdir / "constructor.py",
                 ),
@@ -323,11 +380,58 @@ class gem5Job(Job):
         self._run_script_path = run_script_path
         self._args = args
         self._kwargs = kwargs
-        if experiment.build() is not None:
-            self.depends_on(experiment.build())
+        self._gem5_path = experiment.gem5_path()
+        self._build = experiment.build()
+        if self._build is not None:
+            self.depends_on(self._build)
 
     def run_spec(self) -> RunSpec:
         return self._run_spec
+
+    def _script_path(self) -> Path:
+        path = self._run_script_path
+        return path if path.is_absolute() else self.cwd() / path
+
+    def features(self) -> dict:
+        """The binary and how it was built (the build's spec and the gem5
+        source it compiles, or the build's recorded configuration), the
+        script and its content, the arguments, and the size of every
+        argument that is an existing file."""
+        if self._build is not None:
+            spec = self._build.spec()
+            build = asdict(spec)
+            # NOTE: Threads change how fast it builds, not what it builds.
+            build.pop("threads", None)
+            build["source"] = source_identity(Path(spec.gem5_source_dir))
+        else:
+            config = self._gem5_path.parent / "gem5.build" / "compile_config.json"
+            try:
+                build = json.loads(config.read_text())
+            except (OSError, json.JSONDecodeError):
+                build = None
+        inputs = {}
+        for value in (*self._args, *self._kwargs.values()):
+            if isinstance(value, (str, Path)) and "/" in str(value):
+                path = Path(value)
+                path = path if path.is_absolute() else self.cwd() / path
+                try:
+                    if path.is_file():
+                        inputs[str(value)] = path.stat().st_size
+                except OSError:
+                    pass
+        return {
+            "binary": str(self._gem5_path),
+            "build": build,
+            "script": str(self._run_script_path),
+            "script_content": _file_digest(self._script_path()),
+            "args": [str(arg) for arg in self._args],
+            "kwargs": {key: str(value) for key, value in self._kwargs.items()},
+            "inputs": inputs,
+        }
+
+    def memory_group(self) -> str:
+        """Runs of the same script with the same binary path."""
+        return f"{self._run_script_path.name} on {self._gem5_path}"
 
     def display_command(self) -> str:
         return shlex.join(self._run_spec.argv())
@@ -350,12 +454,15 @@ class gem5Build(PerHostJob):
         self,
         config: "gem5ProjectConfiguration",
         name: str,
-        demand: int | None = None,
+        resources: Resources | None = None,
         threads: int | None = None,
         experiment: str = "builds",
         **options,
     ):
         """
+        :param resources: what each build takes: cores the scheduler counts
+            (at most the whole host; None is 1 core, so a build starts beside
+            running jobs whatever its `threads`) and a memory guess.
         :param options: isas, protocols, binary_opt, bits_per_set, linker,
             gprof, no_tcmalloc, as for `helper build`; unset ones take the
             project's defaults.
@@ -373,7 +480,7 @@ class gem5Build(PerHostJob):
             paths.gem5_out_base_dir() / experiment / name,
         )
         self._cwd = paths.project_dir()
-        self._demand = demand or 1
+        self._resources = Resources.of(resources)
         self._threads = threads or 1
 
     def spec(self):
@@ -381,6 +488,9 @@ class gem5Build(PerHostJob):
 
     def binary(self) -> Path:
         return self._spec.binary()
+
+    def resources(self) -> Resources:
+        return self._resources
 
     def make_job(self, host_name: str, id: str, outdir: Path) -> Job:
         spec_path = outdir / JOB_DIR / "build.json"
@@ -391,7 +501,7 @@ class gem5Build(PerHostJob):
             + shlex.quote(str(spec_path)),
             f"build {self._spec.name}",
             outdir,
-            self._demand,
+            self._resources,
             id,
             dumps=[("build.json", self._spec.to_json(), spec_path)],
         )

@@ -62,6 +62,7 @@
             <th data-sort-by="host">Host</th>
             <th data-sort-by="start_time">Started</th>
             <th data-sort-by="end_time">Ended</th>
+            <th title="estimate before it runs, now/reserved while it runs, peak after">Memory</th>
             <th data-sort-by="command">Command / files</th>
             <th>Actions</th>
           </tr>
@@ -200,6 +201,31 @@
       }
     }
 
+    function fmtSize(n) {
+      if (n === null || n === undefined) return "—";
+      const units = [["T", 2 ** 40], ["G", 2 ** 30], ["M", 2 ** 20], ["K", 2 ** 10]];
+      for (const [unit, size] of units) {
+        if (n >= size) {
+          const v = n / size;
+          return (v < 10 ? v.toFixed(1) : v.toFixed(0)) + unit;
+        }
+      }
+      return n + "B";
+    }
+
+    function memoryCell(j) {
+      if (j.estimate !== null && j.estimate !== undefined) {
+        return `<span title="${esc(j.estimate_detail || "")}">~${esc(fmtSize(j.estimate))}</span><div class="small">${esc(j.estimate_source)}</div>`;
+      }
+      if (j.memory_now !== null && j.memory_now !== undefined) {
+        return `${esc(fmtSize(j.memory_now))}<div class="small">of ${esc(fmtSize(j.reserved))}</div>`;
+      }
+      if (j.memory_peak !== null && j.memory_peak !== undefined) {
+        return `${esc(fmtSize(j.memory_peak))}<div class="small">peak</div>`;
+      }
+      return "";
+    }
+
     function rowHtml(j, ids) {
       const active = ACTIVE.includes(j.status);
       const finished = FINISHED.includes(j.status);
@@ -216,6 +242,7 @@
           <td><span class="pill">${esc(j.host || "—")}</span></td>
           <td class="time">${esc(fmtTime(j.start_time))}</td>
           <td class="time">${esc(fmtTime(j.end_time))}</td>
+          <td class="time">${memoryCell(j)}</td>
           <td>
             <div class="kbd">${esc(j.command)}</div>
             <div class="links">${(j.files || []).map((label) =>
@@ -240,7 +267,7 @@
       const head = `
         <tr class="group" data-experiment="${esc(name)}">
           <td class="check"><input type="checkbox" class="sel-group" ${shownSelected ? "checked" : ""}/></td>
-          <td colspan="6" class="group-title">
+          <td colspan="7" class="group-title">
             <span class="caret">${isCollapsed ? "▶" : "▼"}</span>
             <strong>${esc(name)}</strong>
             <span class="small">${allJobs.length} jobs${shownNote} — ${esc(summary)}</span>
@@ -257,7 +284,7 @@
     function render(state) {
       $("lu").textContent = state.last_update_epoch ? fmtTime(state.last_update_epoch) : "—";
       $("hosts").innerHTML = (state.hosts || []).map((h) =>
-        `<span class="pill" title="${esc(h.domain)}${h.error ? " — " + esc(h.error) : ""}">${esc(h.name)} · ${esc(h.isa)} · ${esc(h.state)}${h.mode !== "active" ? " · " + esc(h.mode) : ""} · ${esc(h.used)}/${esc(h.capacity)}</span>`
+        `<span class="pill" title="${esc(h.domain)}${h.error ? " — " + esc(h.error) : ""}">${esc(h.name)} · ${esc(h.isa)} · ${esc(h.state)}${h.mode !== "active" ? " · " + esc(h.mode) : ""} · ${esc(h.cores_used)}/${esc(h.cores)} cores · ${esc(fmtSize(h.memory_used))}/${esc(fmtSize(h.memory))}</span>`
       ).join(" ") || "none";
 
       renderFilters(state);

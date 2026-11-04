@@ -1,5 +1,6 @@
 """The scheduler's handle on one worker machine."""
 
+import json
 import ssl
 import threading
 import time
@@ -10,10 +11,15 @@ from pathlib import Path
 import rpyc
 
 from ..common import pki
+from .resources import format_size, parse_size
 from .work import Job, JobStatus
 from .worker import PROTOCOL_CONFIG
 
 MAX_BACKOFF = 60.0
+# NOTE: Without a memory limit, jobs may reserve this share of the
+# machine's memory; the rest is left to the OS and everyone else.
+DEFAULT_MEMORY_SHARE = 0.9
+RESOURCES_REFRESH_SECS = 10.0
 
 # NOTE: `uname -m` names, so a job can pick e.g. the matching venv or binary.
 ISAS = ("x86_64", "aarch64", "riscv64")
@@ -60,7 +66,8 @@ class Host:
         name: str,
         isa: str,
         domain: str,
-        max_capacity: int,
+        cores: int | None = None,
+        memory: int | str | None = None,
         port: int = 9100,
         *,
         cert: Path | str | None = None,
@@ -71,6 +78,11 @@ class Host:
         """
         :param isa: the machine's architecture as `uname -m` prints it, one
             of ISAS. Jobs can use it in `Job.compatible_with_host`.
+        :param cores: how many cores jobs may keep busy here; None for all
+            the cores the worker reports.
+        :param memory: how much memory jobs may reserve here, in bytes or
+            as "200G"; None for DEFAULT_MEMORY_SHARE of what the worker
+            reports.
         :param cert, key, ca: the scheduler's client certificate, its key,
             and the CA that signed the worker's certificate. Default to
             `scheduler.crt`, `scheduler.key` and `ca.crt` in the pki dir.
@@ -85,7 +97,9 @@ class Host:
         self._name = name
         self._isa = isa
         self._domain = domain
-        self._max_capacity = max_capacity
+        self._cores: int | None = None
+        self._memory: int | None = None
+        self.set_limits(cores, memory)
         self._port = port
         default_cert, default_key = pki.paths(pki.SCHEDULER)
         self._cert = Path(cert) if cert else default_cert
@@ -99,6 +113,9 @@ class Host:
         self._last_error: str | None = None
         self._failures = 0
         self._next_attempt = 0.0
+        # NOTE: (cores, total memory, available memory) from the worker.
+        self._reported: tuple[int, int, int] | None = None
+        self._reported_at = 0.0
 
     def name(self) -> str:
         return self._name
@@ -109,11 +126,58 @@ class Host:
     def domain(self) -> str:
         return self._domain
 
-    def max_capacity(self) -> int:
-        return self._max_capacity
+    def set_limits(
+        self,
+        cores: "int | str | None" = None,
+        memory: "int | str | None" = None,
+    ) -> None:
+        """Limits for jobs on this host; "auto" goes back to what the
+        worker reports, None leaves a limit as it is."""
+        if cores == "auto":
+            self._cores = None
+        elif cores is not None:
+            if int(cores) < 0:
+                raise ValueError(f"cores can't be negative: {cores}")
+            self._cores = int(cores)
+        if memory == "auto":
+            self._memory = None
+        elif memory is not None:
+            self._memory = parse_size(memory)
 
-    def set_capacity(self, capacity: int) -> None:
-        self._max_capacity = max(0, capacity)
+    def cores(self) -> int:
+        """Cores jobs may use: the limit, or what the worker reported."""
+        if self._cores is not None:
+            return self._cores
+        return self._reported[0] if self._reported else 0
+
+    def memory(self) -> int | None:
+        """Bytes jobs may reserve, or None if there's no limit and the
+        worker hasn't reported yet: then memory isn't limited."""
+        if self._memory is not None:
+            return self._memory
+        if self._reported:
+            return int(self._reported[1] * DEFAULT_MEMORY_SHARE)
+        return None
+
+    def available_memory(self) -> int | None:
+        """Bytes free on the machine right now, as the worker last said."""
+        return self._reported[2] if self._reported else None
+
+    def limits(self) -> dict:
+        return {"cores": self._cores, "memory": self._memory}
+
+    def reported(self) -> tuple[int, int, int] | None:
+        return self._reported
+
+    def refresh_resources(self, force: bool = False) -> None:
+        """Ask the worker for its cores and memory, at most every
+        RESOURCES_REFRESH_SECS."""
+        now = time.time()
+        if not force and now - self._reported_at < RESOURCES_REFRESH_SECS:
+            return
+        self._reported_at = now
+        cores, total, available = self._call("host_resources")
+        self._reported = (int(cores), int(total), int(available))
 
     def state(self) -> HostState:
         return self._state
@@ -176,7 +240,11 @@ class Host:
             self._state = HostState.UP
             self._failures = 0
             self._last_error = None
-            return True
+        try:
+            self.refresh_resources(force=True)
+        except HostUnreachable:
+            return False
+        return True
 
     def disconnect(self) -> None:
         with self._lock:
@@ -231,14 +299,25 @@ class Host:
         )
 
     def statuses(self, jobs: list[Job]) -> list[tuple]:
-        """(status, returncode, message, start_time, end_time) per job."""
+        """(status, returncode, message, start_time, end_time, memory) per
+        job; see `worker.resolve_status`."""
         if not jobs:
             return []
         results = self._call(
             "job_statuses", tuple(job.outdir().as_posix() for job in jobs)
         )
-        # NOTE: Workers older than the start/end times return 3-tuples.
-        return [tuple(result) + (None,) * (5 - len(result)) for result in results]
+        return [tuple(result) for result in results]
+
+    def memory_trace(self, job: Job) -> list[dict]:
+        """The job's memory samples; empty if the worker has none."""
+        data = self._call("memory_trace", job.outdir().as_posix())
+        samples = []
+        for line in bytes(data).decode(errors="replace").splitlines():
+            try:
+                samples.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+        return samples
 
     def signal(self, job: Job, signum: int) -> bool:
         return bool(self._call("signal_job", job.outdir().as_posix(), signum))
@@ -255,7 +334,8 @@ class Host:
             "name": self._name,
             "isa": self._isa,
             "domain": self._domain,
-            "max_capacity": self._max_capacity,
+            "cores": self._cores,
+            "memory": self._memory,
             "port": self._port,
             "cert": str(self._cert),
             "key": str(self._key),
@@ -269,7 +349,8 @@ class Host:
             name=spec["name"],
             isa=spec["isa"],
             domain=spec["domain"],
-            max_capacity=spec["max_capacity"],
+            cores=spec["cores"],
+            memory=spec["memory"],
             port=spec["port"],
             cert=spec.get("cert"),
             key=spec.get("key"),
@@ -281,7 +362,8 @@ class Host:
         return (
             f"{self.__class__.__name__}(name={self._name}, isa={self._isa}, "
             f"domain={self._domain}:{self._port}, "
-            f"capacity={self._max_capacity})"
+            f"cores={self._cores or 'auto'}, "
+            f"memory={format_size(self._memory) if self._memory else 'auto'})"
         )
 
     def __repr__(self) -> str:

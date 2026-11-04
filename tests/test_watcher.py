@@ -24,7 +24,7 @@ def launch(tmp_path: Path, command: str, script: str, **settings) -> Path:
     job_class = type(
         "Watched", (WatchedJob,), dict(script=script, **settings)
     )
-    job = job_class("e", tmp_path, command, command, outdir, 1, "job-id")
+    job = job_class("e", tmp_path, command, command, outdir, None, "job-id")
     Worker().exposed_launch_job(
         job.id(),
         str(tmp_path),
@@ -53,7 +53,7 @@ def log(outdir: Path) -> str:
 
 def test_fail_kills_the_job(tmp_path):
     outdir = launch(tmp_path, "sleep 30", "echo fail stuck")
-    status, _, message, start, end = wait_ended(outdir)
+    status, _, message, start, end, _ = wait_ended(outdir)
     assert (status, message) == ("failed", "watcher: stuck")
     assert end - start < 10
     assert "fail: stuck" in log(outdir)
@@ -61,7 +61,7 @@ def test_fail_kills_the_job(tmp_path):
 
 def test_retry_is_reported(tmp_path):
     outdir = launch(tmp_path, "sleep 30", "echo retry port_proxy fatal")
-    status, _, message, _, _ = wait_ended(outdir)
+    status, _, message, *_ = wait_ended(outdir)
     assert (status, message) == ("retry", "watcher: port_proxy fatal")
 
 
@@ -77,7 +77,7 @@ def test_watcher_judges_a_finished_job(tmp_path):
         '&& echo "fail fatal in stderr (exit $JOB_EXIT_CODE)"'
     )
     outdir = launch(tmp_path, "echo fatal >&2; exit 0", script)
-    status, returncode, message, _, _ = wait_ended(outdir)
+    status, returncode, message, *_ = wait_ended(outdir)
     assert status == "failed" and returncode == 0
     assert message == "watcher: fatal in stderr (exit 0)"
 
@@ -101,7 +101,7 @@ def test_shebang_watcher_uses_its_interpreter(tmp_path):
         "print('fail from python', os.environ['JOB_ID'])\n"
     )
     outdir = launch(tmp_path, "sleep 30", script)
-    status, _, message, _, _ = wait_ended(outdir)
+    status, _, message, *_ = wait_ended(outdir)
     assert (status, message) == ("failed", "watcher: from python job-id")
 
 
@@ -121,6 +121,7 @@ def test_fail_kills_everything_the_job_started(tmp_path):
 
 
 def test_job_without_watcher_has_no_watcher_files(tmp_path):
-    job = Job("e", tmp_path, "true", "true", tmp_path / "j", 1, "id")
-    assert job.dumps() == ()
+    job = Job("e", tmp_path, "true", "true", tmp_path / "j", None, "id")
+    # NOTE: Only the process settings, which every job has.
+    assert [label for label, _, _ in job.dumps()] == ["process"]
     assert "watcher.log" not in dict(job.files())

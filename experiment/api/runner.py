@@ -24,11 +24,18 @@ ends. The first line the watcher prints decides what happens:
 
 The verdict is recorded in exit.json, so the scheduler learns about it the
 same way it learns about any other ending.
+
+The command runs with the nice value in D/.job/process.json. Every
+`memory_interval` seconds (same file) the runner measures the resident memory
+of the command and everything it started: the latest sample goes to
+D/.job/memory.json and every sample to D/.job/memory.jsonl. The peak, which
+the kernel tracks exactly even between samples, goes into exit.json.
 """
 
 import argparse
 import json
 import os
+import resource
 import signal
 import subprocess
 import sys
@@ -40,9 +47,14 @@ JOB_DIR = ".job"
 LAUNCH_FILE = "launch.json"
 EXIT_FILE = "exit.json"
 FILES_FILE = "files.json"
+PROCESS_FILE = "process.json"
+MEMORY_FILE = "memory.json"
+MEMORY_TRACE_FILE = "memory.jsonl"
 WATCHER_FILE = "watcher"
 WATCHER_CONFIG_FILE = "watcher.json"
 WATCHER_LOG_FILE = "watcher.log"
+
+DEFAULT_MEMORY_INTERVAL = 120
 
 WATCHER_ACTIONS = ("ok", "fail", "retry")
 KILL_GRACE_SECS = 10
@@ -157,6 +169,58 @@ class Watcher:
         return action, message.strip()
 
 
+class MemoryMeter:
+    """Samples the resident memory of a process and its descendants."""
+
+    def __init__(self, job_dir: Path, interval: float) -> None:
+        self._latest = job_dir / MEMORY_FILE
+        self._trace = job_dir / MEMORY_TRACE_FILE
+        self.interval = max(1.0, float(interval))
+        self.peak = 0
+        self.samples = 0
+        self._trace.unlink(missing_ok=True)
+        self._latest.unlink(missing_ok=True)
+
+    @staticmethod
+    def tree_rss(pid: int) -> int:
+        """Bytes resident in `pid` and everything it started."""
+        import psutil
+
+        try:
+            procs = [psutil.Process(pid)]
+            procs += procs[0].children(recursive=True)
+        except psutil.NoSuchProcess:
+            return 0
+        total = 0
+        for proc in procs:
+            try:
+                total += proc.memory_info().rss
+            except psutil.Error:
+                pass
+        return total
+
+    def sample(self, pid: int) -> None:
+        rss = self.tree_rss(pid)
+        self.peak = max(self.peak, rss)
+        self.samples += 1
+        now = time.time()
+        with open(self._trace, "a") as f:
+            f.write(json.dumps({"time": now, "rss": rss}) + "\n")
+        write_json_atomic(
+            self._latest, {"time": now, "rss": rss, "peak": self.peak}
+        )
+
+    def result(self) -> dict:
+        """The peak, after the command was waited for. ru_maxrss is the
+        largest peak of any waited-for descendant, in KiB on Linux."""
+        children = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+        return {
+            "peak": max(self.peak, children * 1024),
+            "sampled_peak": self.peak,
+            "samples": self.samples,
+        }
+
+
 def kill_tree(child: subprocess.Popen) -> None:
     """TERM the command and everything it started, then KILL what's left."""
     import psutil
@@ -195,6 +259,11 @@ def main(argv: list[str] | None = None) -> int:
     job_dir = args.outdir / JOB_DIR
     job_dir.mkdir(parents=True, exist_ok=True)
     watcher = Watcher.load(job_dir, args.outdir, args.job_id)
+    process = read_json(job_dir / PROCESS_FILE) or {}
+    nice = int(process.get("nice", 0))
+    meter = MemoryMeter(
+        job_dir, process.get("memory_interval", DEFAULT_MEMORY_INTERVAL)
+    )
 
     received = []
 
@@ -222,15 +291,29 @@ def main(argv: list[str] | None = None) -> int:
                 stdin=subprocess.DEVNULL,
                 stdout=out,
                 stderr=err,
+                # NOTE: The runner has no threads, so preexec_fn is safe.
+                preexec_fn=(lambda: os.nice(nice)) if nice else None,
+            )
+            next_sample = time.monotonic() + meter.interval
+            next_check = (
+                time.monotonic() + watcher.interval if watcher else None
             )
             while True:
+                due = min(t for t in (next_sample, next_check) if t)
                 try:
                     returncode = child.wait(
-                        timeout=watcher.interval if watcher else None
+                        timeout=max(0.0, due - time.monotonic())
                     )
                     break
                 except subprocess.TimeoutExpired:
+                    pass
+                now = time.monotonic()
+                if now >= next_sample:
+                    meter.sample(child.pid)
+                    next_sample = now + meter.interval
+                if next_check is not None and now >= next_check:
                     verdict = watcher.check(child.pid, None)
+                    next_check = time.monotonic() + watcher.interval
                     if verdict[0] != "ok":
                         kill_tree(child)
                         returncode = child.wait()
@@ -251,6 +334,7 @@ def main(argv: list[str] | None = None) -> int:
             "signals_received": received,
             "end_time": time.time(),
             "error": error,
+            "memory": meter.result(),
             "watcher": (
                 None
                 if verdict[0] == "ok"

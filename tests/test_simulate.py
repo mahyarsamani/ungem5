@@ -106,7 +106,7 @@ def make_job(project, *args, **kwargs):
         paths.gem5_out_base_dir() / "sweep",
     )
     script = paths.project_dir() / "run.py"
-    return experiment, script, gem5Job(experiment, 1, script, *args, **kwargs)
+    return experiment, script, gem5Job(experiment, None, script, *args, **kwargs)
 
 
 def test_gem5_job_keeps_its_id_and_gem5_command(project):
@@ -155,7 +155,7 @@ def test_job_runs_gem5_through_the_worker(project, importable, monkeypatch):
     monkeypatch.setenv("FAKE_GEM5_EXIT", "3")
     _, _, job = make_job(project, 4, size=2)
     launch(job)
-    status, returncode, _, _, _ = wait_ended(job.outdir())
+    status, returncode, *_ = wait_ended(job.outdir())
     assert (status, returncode) == ("failed", 3)
     stdout = (job.outdir() / "stdout").read_text()
     assert f"--outdir={job.outdir()}" in stdout and "4 --size 2" in stdout
@@ -167,9 +167,9 @@ def test_job_with_missing_binary_fails_clearly(project, importable):
         "x", paths.project_dir(), paths.gem5_binary_base_dir() / "nope",
         paths.gem5_out_base_dir() / "x",
     )
-    job = gem5Job(experiment, 1, paths.project_dir() / "run.py")
+    job = gem5Job(experiment, None, paths.project_dir() / "run.py")
     launch(job)
-    status, returncode, _, _, _ = wait_ended(job.outdir())
+    status, returncode, *_ = wait_ended(job.outdir())
     assert (status, returncode) == ("failed", 127)
     assert "gem5 binary not found" in (job.outdir() / "stderr").read_text()
 
