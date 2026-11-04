@@ -9,14 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from experiment.api.host import Host
-from experiment.api.memory import MemoryHistory
-from experiment.api.resources import Resources, format_size, parse_size
-from experiment.api.scheduler.state import StateStore
-from experiment.api.work import Experiment, Job, JobStatus
-from experiment.api.scheduler.scheduler import current_user
-from experiment.api.userio import resolve_status
-from experiment.api.worker import Worker
+from ungem5.jobs.resources import Resources, format_size, parse_size
+from ungem5.jobs.work import Experiment, Job, JobStatus
+from ungem5.schedule.host import Host
+from ungem5.schedule.memory import MemoryHistory
+from ungem5.schedule.scheduler import current_user
+from ungem5.schedule.state import StateStore
+from ungem5.schedule.userio import resolve_status
+from ungem5.schedule.worker import Worker
 
 from test_scheduler import FakeRoot, make_scheduler, run
 

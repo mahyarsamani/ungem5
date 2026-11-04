@@ -35,17 +35,17 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import Iterable
 
-from ..bundle import BundleError, unpack
-from ..host import (
+from ..jobs.bundle import BundleError, unpack
+from ..jobs.resources import format_size, parse_size
+from ..jobs.work import Experiment, Job, JobStatus, LoadedJob, PerHostJob
+from .host import (
     SIGNAL,
     Host,
     HostUnreachable,
     JobError,
     job_status_from_worker,
 )
-from ..memory import Estimate, MemoryHistory
-from ..resources import format_size, parse_size
-from ..work import Experiment, Job, JobStatus, LoadedJob, PerHostJob
+from .memory import Estimate, MemoryHistory
 from .state import StateStore
 
 # NOTE: What a job nobody knows anything about may use.

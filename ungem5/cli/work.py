@@ -8,9 +8,10 @@ from pathlib import Path
 
 from rpyc.utils.server import ThreadedServer
 
-from ..api.worker import PROTOCOL_CONFIG, Worker
-from ..common import pki, settings
+from ..common import pki
 from ..common.log import error, info, warn
+from ..jobs import settings
+from ..schedule.worker import PROTOCOL_CONFIG, Worker
 
 
 def parse_work_args(args):

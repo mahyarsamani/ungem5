@@ -3,9 +3,9 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "experiment"
+name = "ungem5"
 version = "0.26.10.2"
-description = "Experimentation tooling for gem5"
+description = "Everything gem5 research needs that is not the simulator: builds, runs, a lab scheduler, and typed statistics."
 license = { text = "MIT" }
 authors = [{ name = "Mahyar Samani", email = "msamani@ucdavis.edu" }]
 requires-python = ">=3.12"
@@ -21,18 +21,18 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
-# NOTE: The learned memory estimate (experiment/api/model.py).
+# NOTE: The learned memory estimate (ungem5/schedule/model.py).
 model = ["scikit-learn"]
 
 [project.urls]
 Homepage = "https://github.com/mahyarsamani/experiment"
 
 [project.scripts]
-helper = "experiment.cli.helper:main_function"
+helper = "ungem5.cli.helper:main_function"
 
 [tool.setuptools.packages.find]
-include = ["experiment*"]
+include = ["ungem5*"]
 
 [tool.setuptools.package-data]
-"experiment.common" = ["assets/*.py"]
-"experiment.api.scheduler" = ["templates/*.html", "static/*.css"]
+"ungem5.jobs" = ["assets/*.py"]
+"ungem5.schedule" = ["templates/*.html", "static/*.css"]

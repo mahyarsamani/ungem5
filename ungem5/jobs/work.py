@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING, Iterable, Sequence, Tuple
 from .resources import Resources
 
 if TYPE_CHECKING:
+    from ..schedule.host import Host
     from .bundle import Bundle
-    from .host import Host
 
 MEMORY_EXCEED_ACTIONS = ("pause", "kill", "retry")
 

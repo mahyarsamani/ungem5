@@ -221,7 +221,7 @@ class Worker(rpyc.Service):
         runner = [
             sys.executable,
             "-m",
-            "experiment.api.runner",
+            "ungem5.schedule.runner",
             "--outdir",
             outdir,
             "--cwd",

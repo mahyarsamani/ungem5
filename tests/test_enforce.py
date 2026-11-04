@@ -7,11 +7,11 @@ import time
 
 import psutil
 
-from experiment.api.resources import Resources
-from experiment.api.scheduler.scheduler import current_user
-from experiment.api.userio import resolve_status
-from experiment.api.work import Experiment, Job, JobStatus
-from experiment.api.worker import Worker
+from ungem5.jobs.resources import Resources
+from ungem5.jobs.work import Experiment, Job, JobStatus
+from ungem5.schedule.scheduler import current_user
+from ungem5.schedule.userio import resolve_status
+from ungem5.schedule.worker import Worker
 
 from test_memory import MemoryRoot
 from test_scheduler import install, make_scheduler, run

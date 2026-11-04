@@ -2,7 +2,7 @@
 
 The worker launches this module, as the job's owner:
 
-    python -m experiment.api.runner --outdir D --cwd C --job-id I -- <command>
+    python -m ungem5.schedule.runner --outdir D --cwd C --job-id I -- <command>
 
 The runner leads its own process group, writes D/.job/launch.json (its pid
 and start time) and logs to D/.job/runner.log. It runs `<command>` with
@@ -273,7 +273,7 @@ def kill_tree(child: subprocess.Popen) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="experiment.api.runner")
+    parser = argparse.ArgumentParser(prog="ungem5.schedule.runner")
     parser.add_argument("--outdir", required=True, type=Path)
     parser.add_argument("--cwd", required=True, type=Path)
     parser.add_argument("--job-id", default="")
@@ -336,7 +336,7 @@ def main(argv: list[str] | None = None) -> int:
                 ["bash", "-c", command],
                 cwd=args.cwd,
                 # NOTE: So job commands can run this package's modules with
-                # the worker's own Python, e.g. experiment.api.simulate.
+                # the worker's own Python, e.g. ungem5.run.simulate.
                 env=dict(os.environ, EXPERIMENT_PYTHON=sys.executable),
                 stdin=subprocess.DEVNULL,
                 stdout=out,

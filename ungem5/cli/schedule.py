@@ -3,16 +3,16 @@ import platform
 
 from pathlib import Path
 
-from ..api.scheduler.console import ControlClient, run_console
-from ..api.scheduler.daemon import (
+from ..common.log import error, info, warn
+from ..jobs import settings
+from ..schedule.console import ControlClient, run_console
+from ..schedule.daemon import (
     DEFAULT_DASHBOARD_PORT,
     DEFAULT_POLLING_SECS,
     run_daemon,
     spawn_daemon,
 )
-from ..api.scheduler.state import InstanceLock
-from ..common import settings
-from ..common.log import error, info, warn
+from ..schedule.state import InstanceLock
 
 
 def parse_schedule_args(args):

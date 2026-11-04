@@ -11,12 +11,12 @@ from hashlib import sha256
 from pathlib import Path
 from typing import List, Optional
 
-from ..api.bundle import Bundle, discover
-from ..api.resources import Resources
-from ..api.runner import JOB_DIR
-from ..api.simulate import RunSpec
-from ..api.work import Job, Experiment, PerHostJob, ProjectConfiguration
-from .log import warn
+from ..common.log import warn
+from ..run.simulate import RunSpec
+from ..schedule.runner import JOB_DIR
+from .bundle import Bundle, discover
+from .resources import Resources
+from .work import Job, Experiment, PerHostJob, ProjectConfiguration
 
 SOURCE_IDENTITY_SECS = 60.0
 _source_identities: dict[str, tuple[float, dict]] = {}
@@ -306,8 +306,8 @@ class gem5Job(Job):
         body = "".join(f"    {arg},\n" for arg in call_args)
         return (
             "from pathlib import Path\n\n"
-            "from experiment.api.resources import Resources\n"
-            "from experiment.common.gem5_work import (\n"
+            "from ungem5.jobs.resources import Resources\n"
+            "from ungem5.jobs.gem5_work import (\n"
             "    OtherValues,\n"
             "    gem5Experiment,\n"
             "    gem5Job,\n"
@@ -372,8 +372,8 @@ class gem5Job(Job):
             experiment.name(),
             experiment.cwd(),
             # NOTE: The worker's Python runs the spec and becomes gem5; see
-            # experiment.api.simulate.
-            '"$EXPERIMENT_PYTHON" -m experiment.api.simulate '
+            # ungem5.run.simulate.
+            '"$EXPERIMENT_PYTHON" -m ungem5.run.simulate '
             + shlex.quote(str(spec_path)),
             gem5Job.make_shorthand_command(
                 experiment.gem5_path(), run_script_path, *args, **kwargs
@@ -489,8 +489,8 @@ class gem5Build(PerHostJob):
             gprof, no_tcmalloc, as for `helper build`; unset ones take the
             project's defaults.
         """
-        # NOTE: Imported here: experiment.api.build imports this module.
-        from ..api.build import BuildSpec
+        # NOTE: Imported here: ungem5.run.build imports this module.
+        from ..run.build import BuildSpec
 
         self._spec = BuildSpec.from_project(
             config, name, threads=threads, **options
@@ -519,7 +519,7 @@ class gem5Build(PerHostJob):
         return Job(
             self.experiment(),
             self._cwd,
-            '"$EXPERIMENT_PYTHON" -m experiment.api.build '
+            '"$EXPERIMENT_PYTHON" -m ungem5.run.build '
             + shlex.quote(str(spec_path)),
             f"build {self._spec.name}",
             outdir,
@@ -544,7 +544,7 @@ class gem5Experiment(Experiment):
         :param build: a gem5Build; every job of this experiment then
             depends on it and runs its binary (`gem5_path` is not needed).
         :param bundle: ship each job's Python (its run script and the
-            project files it imports; see experiment.api.bundle) to its
+            project files it imports; see ungem5.jobs.bundle) to its
             host, frozen at load, instead of running the files in `cwd`.
             `cwd` is the project root the bundle is relative to.
         :param extra_files: files to bundle that imports don't show, e.g.

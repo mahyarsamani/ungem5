@@ -11,7 +11,7 @@ fit on all but the newest HOLDOUT of the runs, and the correction is the
 COVERAGE quantile of peak/prediction over those held out, so about
 COVERAGE of similar new jobs fit in what the model reserves.
 
-Needs scikit-learn (`pip install "experiment[model]"`); without it, or with
+Needs scikit-learn (`pip install "ungem5[model]"`); without it, or with
 fewer than MIN_RUNS complete runs, there is no model and the history's
 other estimates apply.
 """

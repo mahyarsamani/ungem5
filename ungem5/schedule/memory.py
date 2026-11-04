@@ -33,9 +33,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..jobs.resources import format_size
+from ..jobs.work import Job
 from .model import PeakModel, Run
-from .resources import format_size
-from .work import Job
 
 HISTORY_MARGIN = 0.10
 GROUP_MARGIN = 0.15

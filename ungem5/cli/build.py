@@ -1,12 +1,12 @@
 import argparse
 
-from ..api.build import Builder, BuildSpec
 from ..common.log import error
-from ..common.gem5_work import (
+from ..jobs.gem5_work import (
     BinaryOpt,
     ISA,
     Protocol,
 )
+from ..run.build import Builder, BuildSpec
 
 
 def parse_build_args(args):

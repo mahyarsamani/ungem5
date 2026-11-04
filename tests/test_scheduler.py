@@ -4,11 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from experiment.api.host import Host, HostState
-from experiment.api.scheduler.scheduler import CommandError, Scheduler
-from experiment.api.scheduler.state import StateStore
-from experiment.api.script import compile_objects, compile_script
-from experiment.api.work import Experiment, Job, JobStatus
+from ungem5.jobs.script import compile_objects, compile_script
+from ungem5.jobs.work import Experiment, Job, JobStatus
+from ungem5.schedule.host import Host, HostState
+from ungem5.schedule.scheduler import CommandError, Scheduler
+from ungem5.schedule.state import StateStore
 
 
 class RemoteError(RuntimeError):

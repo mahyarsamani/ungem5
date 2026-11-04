@@ -10,13 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from experiment.api.bundle import BundleError, discover, pack, unpack
-from experiment.api.scheduler.scheduler import CommandError, Scheduler, current_user
-from experiment.api.scheduler.state import StateStore
-from experiment.api.script import compile_objects
-from experiment.api.userio import LocalIO, resolve_status, workdir
-from experiment.api.worker import Worker
-from experiment.common.gem5_work import gem5Experiment, gem5Job
+from ungem5.jobs.bundle import BundleError, discover, pack, unpack
+from ungem5.jobs.gem5_work import gem5Experiment, gem5Job
+from ungem5.jobs.script import compile_objects
+from ungem5.schedule.scheduler import CommandError, Scheduler, current_user
+from ungem5.schedule.state import StateStore
+from ungem5.schedule.userio import LocalIO, resolve_status, workdir
+from ungem5.schedule.worker import Worker
 
 from test_scheduler import FakeRoot, make_host, run
 

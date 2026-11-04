@@ -5,23 +5,23 @@ from pathlib import Path
 
 import pytest
 
-from experiment.api.resources import Resources
-from experiment.api.scheduler.console import Console, ConsoleError
-from experiment.api.scheduler.scheduler import Scheduler
-from experiment.api.scheduler.state import StateStore
-from experiment.api.script import (
+from ungem5.jobs.resources import Resources
+from ungem5.jobs.script import (
     ScriptError,
     compile_in_subprocess,
     compile_objects,
 )
-from experiment.api.work import Experiment, Job, JobStatus, LoadedJob
+from ungem5.jobs.work import Experiment, Job, JobStatus, LoadedJob
+from ungem5.schedule.console import Console, ConsoleError
+from ungem5.schedule.scheduler import Scheduler
+from ungem5.schedule.state import StateStore
 
 from test_scheduler import FakeRoot, make_host, run
 
 SCRIPT = """
 from pathlib import Path
-from experiment.api.host import Host
-from experiment.api.work import Experiment, Job
+from ungem5.schedule.host import Host
+from ungem5.jobs.work import Experiment, Job
 from sizes import COMMAND
 
 worker = Host("w1", "x86_64", "localhost", 4, "8G", insecure=True)

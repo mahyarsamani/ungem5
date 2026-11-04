@@ -10,13 +10,13 @@ from pathlib import Path
 
 import pytest
 
-import experiment.api.simulate as simulate
-from experiment.api.simulate import RunSpec, Simulator
-from experiment.api.scheduler.scheduler import current_user
-from experiment.api.userio import resolve_status
-from experiment.api.worker import Worker
-from experiment.cli.run import _process_run_args, parse_run_args
-from experiment.common.gem5_work import (
+import ungem5.run.simulate as simulate
+from ungem5.cli.run import _process_run_args, parse_run_args
+from ungem5.run.simulate import RunSpec, Simulator
+from ungem5.schedule.scheduler import current_user
+from ungem5.schedule.userio import resolve_status
+from ungem5.schedule.worker import Worker
+from ungem5.jobs.gem5_work import (
     OtherValues,
     calculate_hash,
     gem5Experiment,
@@ -126,7 +126,7 @@ def test_gem5_job_keeps_its_id_and_gem5_command(project):
     assert job.display_command() == gem5Job.make_command(
         experiment.gem5_path(), job.outdir(), script, 4, "a b", **kwargs
     )
-    assert "experiment.api.simulate" in job.command()
+    assert "ungem5.run.simulate" in job.command()
     dumped = {label: content for label, content, _ in job.dumps()}
     assert RunSpec(**json.loads(dumped["run.json"])) == job.run_spec()
     assert job.view()["full_command"] == job.display_command()

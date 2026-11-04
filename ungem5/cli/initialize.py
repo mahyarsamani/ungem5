@@ -1,8 +1,8 @@
 import argparse
 
-from ..common.config_util import initialize_directories
 from ..common.log import error
-from ..common.gem5_work import (
+from ..jobs.config_util import initialize_directories
+from ..jobs.gem5_work import (
     ISA,
     Protocol,
     BinaryOpt,

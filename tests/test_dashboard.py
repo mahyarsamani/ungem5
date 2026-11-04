@@ -5,8 +5,8 @@ import threading
 
 import pytest
 
-from experiment.api.scheduler.dashboard import COOKIE, Dashboard, summarize
-from experiment.api.scheduler.scheduler import current_user
+from ungem5.schedule.dashboard import COOKIE, Dashboard, summarize
+from ungem5.schedule.scheduler import current_user
 
 from test_scheduler import FakeRoot, make_experiment, make_scheduler
 

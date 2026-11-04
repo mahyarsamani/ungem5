@@ -2,7 +2,7 @@
 
 A load script is Python that defines Hosts and Experiments. The console
 runs it, as the user, in a fresh interpreter (`python -m
-experiment.api.script`), and sends the scheduler what it defines as data:
+ungem5.jobs.script`), and sends the scheduler what it defines as data:
 every job's command, files, dumps, features and dependencies, the hosts it
 may run on, and the packed bundles of the Python jobs run (`bundle.py`),
 which freezes that code at load. The scheduler never runs a script's code, and a
@@ -23,8 +23,8 @@ import traceback
 from pathlib import Path
 from typing import Any, Iterable
 
+from ..schedule.host import Host
 from . import bundle
-from .host import Host
 from .work import Experiment, Job, PerHostJob
 
 
@@ -208,7 +208,7 @@ def compile_in_subprocess(
             # stale on an edit within the same second.
             result = subprocess.run(
                 [
-                    sys.executable, "-B", "-m", "experiment.api.script",
+                    sys.executable, "-B", "-m", "ungem5.jobs.script",
                     str(script), str(hosts_path), str(out_path),
                 ],
                 stdin=subprocess.DEVNULL,
@@ -225,7 +225,7 @@ def compile_in_subprocess(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="experiment.api.script")
+    parser = argparse.ArgumentParser(prog="ungem5.jobs.script")
     parser.add_argument("script", type=Path)
     parser.add_argument("hosts", type=Path, help="JSON list of host views.")
     parser.add_argument("out", type=Path)

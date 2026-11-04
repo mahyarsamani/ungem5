@@ -4,10 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from experiment.api.scheduler.scheduler import CommandError, Scheduler
-from experiment.api.scheduler.state import StateStore
-from experiment.api.resources import Resources
-from experiment.api.work import Experiment, Job, JobStatus, PerHostJob
+from ungem5.jobs.resources import Resources
+from ungem5.jobs.work import Experiment, Job, JobStatus, PerHostJob
+from ungem5.schedule.scheduler import CommandError, Scheduler
+from ungem5.schedule.state import StateStore
 
 from test_scheduler import FakeRoot, install, load, make_host, run
 
@@ -235,8 +235,8 @@ def test_delete_respects_dependents(tmp_path):
 
 SCRIPT = """
 from pathlib import Path
-from experiment.api.host import Host
-from experiment.api.work import Experiment, Job, PerHostJob
+from ungem5.schedule.host import Host
+from ungem5.jobs.work import Experiment, Job, PerHostJob
 
 class Build(PerHostJob):
     def make_job(self, host_name, id, outdir):

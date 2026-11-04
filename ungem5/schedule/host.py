@@ -11,8 +11,8 @@ from pathlib import Path
 import rpyc
 
 from ..common import pki
-from .resources import format_size, parse_size
-from .work import Job, JobStatus
+from ..jobs.resources import format_size, parse_size
+from ..jobs.work import Job, JobStatus
 from .worker import PROTOCOL_CONFIG
 
 MAX_BACKOFF = 60.0

@@ -27,18 +27,18 @@ from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.patch_stdout import patch_stdout
 
-from ..host import remote_message
-from ..resources import format_size
-from ..script import ScriptError, compile_in_subprocess
-from ..work import JobStatus
-from ..worker import PROTOCOL_CONFIG
+from ..jobs.resources import format_size
+from ..jobs.script import ScriptError, compile_in_subprocess
+from ..jobs.work import JobStatus
 from .daemon import (
     DEFAULT_DASHBOARD_PORT,
     DEFAULT_POLLING_SECS,
     spawn_daemon,
 )
 from .filters import JobFilter, format_time
+from .host import remote_message
 from .state import InstanceLock, socket_path
+from .worker import PROTOCOL_CONFIG
 
 SIGNALS = ("term", "int", "quit", "kill")
 STATUSES = tuple(status.value for status in JobStatus)

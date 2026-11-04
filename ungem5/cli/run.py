@@ -3,9 +3,9 @@ import time
 
 from pathlib import Path
 
-from ..api.simulate import RunSpec, Simulator
 from ..common.log import info, warn
-from ..common.gem5_work import (
+from ..run.simulate import RunSpec, Simulator
+from ..jobs.gem5_work import (
     BinaryOpt,
     gem5BuildConfiguration,
 )

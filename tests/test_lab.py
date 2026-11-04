@@ -11,21 +11,21 @@ import pytest
 
 from rpyc.utils.authenticators import AuthenticationError
 
-import experiment.api.worker as worker_module
+import ungem5.schedule.worker as worker_module
 
-from experiment.api.host import Host
-from experiment.api.resources import Resources
-from experiment.api.scheduler.daemon import PeerUidAuthenticator
-from experiment.api.scheduler.dashboard import COOKIE, Dashboard
-from experiment.api.scheduler.scheduler import (
+from ungem5.jobs.resources import Resources
+from ungem5.jobs.script import compile_objects
+from ungem5.jobs.work import Experiment, Job, JobStatus
+from ungem5.schedule.daemon import PeerUidAuthenticator
+from ungem5.schedule.dashboard import COOKIE, Dashboard
+from ungem5.schedule.host import Host
+from ungem5.schedule.scheduler import (
     CommandError,
     Scheduler,
     current_user,
 )
-from experiment.api.script import compile_objects
-from experiment.api.userio import HelperIO, LocalIO, resolve_status, serve
-from experiment.api.work import Experiment, Job, JobStatus
-from experiment.api.worker import Worker
+from ungem5.schedule.userio import HelperIO, LocalIO, resolve_status, serve
+from ungem5.schedule.worker import Worker
 
 from test_memory import MemoryRoot
 from test_scheduler import make_host
@@ -251,7 +251,7 @@ def test_a_helper_process_does_the_work(tmp_path, monkeypatch):
         helper,
         "_start",
         lambda: __import__("subprocess").Popen(
-            [sys.executable, "-m", "experiment.api.userio"],
+            [sys.executable, "-m", "ungem5.schedule.userio"],
             stdin=-1, stdout=-1,
         ),
     )

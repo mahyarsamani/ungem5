@@ -20,7 +20,7 @@ from flask import Response, stream_with_context
 from werkzeug.exceptions import HTTPException
 from werkzeug.serving import make_server
 
-from ..host import HostUnreachable, JobError
+from .host import HostUnreachable, JobError
 from .scheduler import Caller, CommandError, Scheduler, current_user
 
 COOKIE = "experiment_dashboard"

@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from experiment.api.scheduler.scheduler import current_user
-from experiment.api.userio import resolve_status
-from experiment.api.worker import Worker
+from ungem5.schedule.scheduler import current_user
+from ungem5.schedule.userio import resolve_status
+from ungem5.schedule.worker import Worker
 
 ME = current_user()
 

@@ -2,7 +2,7 @@
 
 A worker run by a user does these in its own process (`LocalIO`). A worker
 run by root (the lab setup) never touches users' files itself: for each
-user it keeps a helper process, `python -m experiment.api.userio`, running
+user it keeps a helper process, `python -m ungem5.schedule.userio`, running
 as that user (`HelperIO`), so ownership, permissions and NFS root squash
 work as they would for the user. The helper reads one JSON request per
 line on stdin and answers with one JSON line on stdout.
@@ -24,7 +24,7 @@ from pathlib import Path
 
 import psutil
 
-from . import bundle
+from ..jobs import bundle
 from .runner import (
     EXIT_FILE,
     FILES_FILE,
@@ -379,7 +379,7 @@ class HelperIO:
     def _start(self) -> subprocess.Popen:
         account = self._account
         return subprocess.Popen(
-            [sys.executable, "-B", "-m", "experiment.api.userio"],
+            [sys.executable, "-B", "-m", "ungem5.schedule.userio"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             user=account.pw_uid,

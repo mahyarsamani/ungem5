@@ -6,10 +6,10 @@ from pathlib import Path
 
 import psutil
 
-from experiment.api.work import Job
-from experiment.api.scheduler.scheduler import current_user
-from experiment.api.userio import resolve_status
-from experiment.api.worker import Worker
+from ungem5.jobs.work import Job
+from ungem5.schedule.scheduler import current_user
+from ungem5.schedule.userio import resolve_status
+from ungem5.schedule.worker import Worker
 
 
 class WatchedJob(Job):

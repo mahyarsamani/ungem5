@@ -5,7 +5,7 @@ import pwd
 
 import pytest
 
-from experiment.common import settings
+from ungem5.jobs import settings
 
 
 def test_defaults_then_system_then_user(tmp_path):

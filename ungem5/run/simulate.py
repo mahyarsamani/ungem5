@@ -7,7 +7,7 @@ arguments, outdir, debug options, environment); a `Simulator` runs it:
   under gdb);
 - a simulation job writes its spec into its outdir and runs, on the worker,
 
-    python -m experiment.api.simulate <outdir>/.job/run.json
+    python -m ungem5.run.simulate <outdir>/.job/run.json
 
   which replaces itself with gem5, so the job's exit code and processes are
   gem5's own. `helper run --spec <outdir>/.job/run.json` reruns it by hand.
@@ -112,11 +112,12 @@ class Simulator:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    usage = "usage: python -m ungem5.run.simulate <run.json>"
+    if argv in (["-h"], ["--help"]):
+        print(usage)
+        return 0
     if len(argv) != 1:
-        print(
-            "usage: python -m experiment.api.simulate <run.json>",
-            file=sys.stderr,
-        )
+        print(usage, file=sys.stderr)
         return 2
     try:
         Simulator(RunSpec.load(Path(argv[0]))).exec()

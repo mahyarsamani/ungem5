@@ -7,8 +7,8 @@ import pytest
 from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
-from experiment.api.scheduler.console import ConsoleCompleter, build_parser
-from experiment.api.scheduler.filters import JobFilter, parse_time
+from ungem5.schedule.console import ConsoleCompleter, build_parser
+from ungem5.schedule.filters import JobFilter, parse_time
 
 
 def at(text: str) -> float:

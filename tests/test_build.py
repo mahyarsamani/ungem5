@@ -11,13 +11,13 @@ from pathlib import Path
 
 import pytest
 
-import experiment.api.build as build
-from experiment.api.build import Builder, BuildSpec
-from experiment.api.host import Host
-from experiment.api.resources import Resources
-from experiment.api.script import compile_objects
-from experiment.cli.build import _process_build_args, parse_build_args
-from experiment.common.gem5_work import gem5ProjectConfiguration
+import ungem5.run.build as build
+from ungem5.cli.build import _process_build_args, parse_build_args
+from ungem5.jobs.gem5_work import gem5ProjectConfiguration
+from ungem5.jobs.resources import Resources
+from ungem5.jobs.script import compile_objects
+from ungem5.run.build import Builder, BuildSpec
+from ungem5.schedule.host import Host
 
 
 @pytest.fixture
@@ -150,7 +150,7 @@ def test_worker_entry_point_builds_from_a_spec(project, tmp_path, fake_scons):
     spec_path = tmp_path / "build.json"
     spec_path.write_text(BuildSpec.from_project(project, "main").to_json())
     result = subprocess.run(
-        [sys.executable, "-m", "experiment.api.build", str(spec_path)],
+        [sys.executable, "-m", "ungem5.run.build", str(spec_path)],
         capture_output=True,
         text=True,
     )
@@ -160,7 +160,7 @@ def test_worker_entry_point_builds_from_a_spec(project, tmp_path, fake_scons):
 
 
 def test_gem5_build_jobs_and_experiments(project):
-    from experiment.common.gem5_work import gem5Build, gem5Experiment, gem5Job
+    from ungem5.jobs.gem5_work import gem5Build, gem5Experiment, gem5Job
 
     main = gem5Build(project, "main", Resources(1, "6G"), 8, isas="X86")
     paths = project.path_config()
@@ -172,7 +172,7 @@ def test_gem5_build_jobs_and_experiments(project):
     assert instance.memory_guess() == 6 << 30
     assert gem5Build(project, "main", Resources(8)).instance("x").cores() == 8
     assert instance.outdir() == paths.gem5_out_base_dir() / "builds" / "main" / "perle"
-    assert "experiment.api.build" in instance.command()
+    assert "ungem5.run.build" in instance.command()
     (_, content, spec_path), _process = instance.dumps()
     assert BuildSpec(**json.loads(content)) == main.spec()
     assert spec_path == instance.outdir() / ".job" / "build.json"

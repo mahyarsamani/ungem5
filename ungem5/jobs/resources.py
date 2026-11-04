@@ -45,7 +45,7 @@ class Resources:
         single-threaded.
     :param memory: your guess of its peak memory, in bytes or as "16G".
         The scheduler checks it against what similar jobs actually used
-        and reserves its own estimate; see `experiment.api.memory`.
+        and reserves its own estimate; see `ungem5.schedule.memory`.
     """
 
     cores: int = 1

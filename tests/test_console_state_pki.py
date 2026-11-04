@@ -14,17 +14,17 @@ from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 from rpyc.utils.server import ThreadedServer
 
-from experiment.api.scheduler.console import (
+from ungem5.common import pki
+from ungem5.jobs.gem5_work import calculate_hash
+from ungem5.schedule.console import (
     ConsoleCompleter,
     ConsoleError,
     _HelpShown,
     build_parser,
     short_ids,
 )
-from experiment.api.scheduler.state import InstanceLock, StateStore
-from experiment.api.worker import PROTOCOL_CONFIG, Worker
-from experiment.common import pki
-from experiment.common.gem5_work import calculate_hash
+from ungem5.schedule.state import InstanceLock, StateStore
+from ungem5.schedule.worker import PROTOCOL_CONFIG, Worker
 
 
 def test_hash_keeps_item_boundaries():
@@ -84,7 +84,7 @@ def test_instance_lock_is_exclusive_and_released_on_kill(tmp_path):
         [
             sys.executable,
             "-c",
-            "import time; from experiment.api.scheduler.state import "
+            "import time; from ungem5.schedule.state import "
             "InstanceLock; assert InstanceLock().acquire({'pid': 1}); "
             "print('locked', flush=True); time.sleep(60)",
         ],

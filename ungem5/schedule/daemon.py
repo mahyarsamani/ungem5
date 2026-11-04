@@ -35,12 +35,12 @@ from rpyc.utils.server import ThreadedServer
 
 from rpyc.utils.helpers import classpartial
 
-from ...common import settings
-from ...common.log import error, info, install_warning_format
-from ..worker import PROTOCOL_CONFIG
+from ..common.log import error, info, install_warning_format
+from ..jobs import settings
 from .dashboard import Dashboard
 from .scheduler import Caller, CommandError, Scheduler
 from .state import InstanceLock, StateStore, socket_path, state_dir
+from .worker import PROTOCOL_CONFIG
 
 DEFAULT_DASHBOARD_PORT = 9200
 DEFAULT_POLLING_SECS = 1.0
@@ -284,7 +284,7 @@ def daemon_command(
     return [
         sys.executable,
         "-m",
-        "experiment.api.scheduler.daemon",
+        "ungem5.schedule.daemon",
         "--name",
         name,
         "--dashboard-port",
@@ -337,7 +337,7 @@ def spawn_daemon(
 def main(argv: list[str] | None = None) -> int:
     install_warning_format()
     parser = argparse.ArgumentParser(
-        prog="experiment.api.scheduler.daemon",
+        prog="ungem5.schedule.daemon",
         description="Run a scheduler. With --lab, a lab scheduler whose "
         f"defaults come from [scheduler] in {settings.SYSTEM_FILE}.",
     )

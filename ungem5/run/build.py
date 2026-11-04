@@ -6,7 +6,7 @@ protocols, options); a `Builder` builds it on the machine it runs on:
 - `helper build` makes a spec from its arguments and runs a Builder;
 - a build job writes its spec into its outdir and runs, on the worker,
 
-    python -m experiment.api.build <outdir>/.job/build.json
+    python -m ungem5.run.build <outdir>/.job/build.json
 
 A lock on the host's build directory keeps two builds of the same name on
 one host (from either frontend) from running at once.
@@ -21,8 +21,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from ..common.cmd_util import run_command
-from ..common.gem5_work import gem5BuildConfiguration
 from ..common.log import error, info, warn
+from ..jobs.gem5_work import gem5BuildConfiguration
 
 COMPILE_CONFIG_FILE = "compile_config.json"
 
@@ -179,8 +179,12 @@ class Builder:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    usage = "usage: python -m ungem5.run.build <spec.json>"
+    if argv in (["-h"], ["--help"]):
+        print(usage)
+        return 0
     if len(argv) != 1:
-        print("usage: python -m experiment.api.build <spec.json>", file=sys.stderr)
+        print(usage, file=sys.stderr)
         return 2
     return Builder(BuildSpec.load(Path(argv[0]))).run()
 

@@ -20,14 +20,14 @@ def _dispatch(command: str, args: list[str]) -> int | None:
 
         return _process_initialize_args(*parse_initialize_args(args))
     if command == "build":
-        from ..common.config_util import _get_project_config
+        from ..jobs.config_util import _get_project_config
         from .build import parse_build_args, _process_build_args
 
         return _process_build_args(
             _get_project_config(), *parse_build_args(args)
         )
     if command == "run":
-        from ..common.config_util import _get_project_config
+        from ..jobs.config_util import _get_project_config
         from .run import parse_run_args, _process_run_args
 
         # NOTE: Passed uncalled: `run --spec` works outside any project.

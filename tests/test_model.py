@@ -5,9 +5,9 @@ import time
 
 import pytest
 
-from experiment.api.memory import MemoryHistory
-from experiment.api.model import COVERAGE, MIN_RUNS, PeakModel, Run, flatten
-from experiment.api.work import Job
+from ungem5.jobs.work import Job
+from ungem5.schedule.memory import MemoryHistory
+from ungem5.schedule.model import COVERAGE, MIN_RUNS, PeakModel, Run, flatten
 
 M = 1 << 20
 

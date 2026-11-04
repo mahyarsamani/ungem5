@@ -7,8 +7,8 @@ from git import Repo
 from importlib.resources import files
 from pathlib import Path
 
+from ..common.log import warn
 from . import assets
-from .log import warn
 from .gem5_work import gem5ProjectConfiguration
 
 config_file_name = "project_config.json"

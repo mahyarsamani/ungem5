@@ -4,15 +4,15 @@ from pathlib import Path
 
 import pytest
 
-from experiment.api.scheduler.scheduler import CommandError, Scheduler
-from experiment.api.scheduler.state import StateStore
-from experiment.api.work import JobStatus
+from ungem5.jobs.work import JobStatus
+from ungem5.schedule.scheduler import CommandError, Scheduler
+from ungem5.schedule.state import StateStore
 
 from test_scheduler import FakeRoot, load, make_host, run
 
 SCRIPT = """
 from pathlib import Path
-from experiment.api.work import Experiment, Job
+from ungem5.jobs.work import Experiment, Job
 
 {name} = Experiment("{name}", Path("{tmp}/{name}"))
 for i in range({count}):
