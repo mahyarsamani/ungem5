@@ -115,6 +115,8 @@ class Job:
         # NOTE: Set on the instances of a PerHostJob: the only host they
         # may run on.
         self._pinned_host: str | None = None
+        # NOTE: The user it runs as; the scheduler sets it on load.
+        self._owner: str | None = None
         self.depends_on(*after)
 
     def depends_on(self, *parents: "Job | PerHostJob") -> "Job":
@@ -148,6 +150,12 @@ class Job:
 
     def pinned_host(self) -> str | None:
         return self._pinned_host
+
+    def owner(self) -> str | None:
+        return self._owner
+
+    def set_owner(self, user: str) -> None:
+        self._owner = user
 
     # NOTE: Watcher settings; override in a subclass along with `watcher`.
     watch_interval = 60

@@ -7,7 +7,9 @@ from pathlib import Path
 import psutil
 
 from experiment.api.work import Job
-from experiment.api.worker import Worker, resolve_status
+from experiment.api.scheduler.scheduler import current_user
+from experiment.api.userio import resolve_status
+from experiment.api.worker import Worker
 
 
 class WatchedJob(Job):
@@ -27,6 +29,7 @@ def launch(tmp_path: Path, command: str, script: str, **settings) -> Path:
     job = job_class("e", tmp_path, command, command, outdir, None, "job-id")
     Worker().exposed_launch_job(
         job.id(),
+        current_user(),
         str(tmp_path),
         command,
         str(outdir),

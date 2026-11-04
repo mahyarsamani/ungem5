@@ -17,6 +17,8 @@ import time
 from pathlib import Path
 
 STATE_VERSION = 2
+# NOTE: Where a lab scheduler (a system service) listens for consoles.
+LAB_SOCKET = Path("/run/experiment/scheduler.sock")
 
 
 def runtime_dir() -> Path:

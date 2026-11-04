@@ -12,7 +12,9 @@ import pytest
 
 import experiment.api.simulate as simulate
 from experiment.api.simulate import RunSpec, Simulator
-from experiment.api.worker import Worker, resolve_status
+from experiment.api.scheduler.scheduler import current_user
+from experiment.api.userio import resolve_status
+from experiment.api.worker import Worker
 from experiment.cli.run import _process_run_args, parse_run_args
 from experiment.common.gem5_work import (
     OtherValues,
@@ -139,7 +141,8 @@ def wait_ended(outdir, timeout=15):
 
 def launch(job):
     Worker().exposed_launch_job(
-        job.id(), str(job.cwd()), job.command(), str(job.outdir()),
+        job.id(), current_user(), str(job.cwd()), job.command(),
+        str(job.outdir()),
         tuple((label, str(path)) for label, path in job.files()),
         tuple((content, str(path)) for _, content, path in job.dumps()),
     )

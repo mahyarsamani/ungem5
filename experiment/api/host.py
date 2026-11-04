@@ -85,7 +85,8 @@ class Host:
             reports.
         :param cert, key, ca: the scheduler's client certificate, its key,
             and the CA that signed the worker's certificate. Default to
-            `scheduler.crt`, `scheduler.key` and `ca.crt` in the pki dir.
+            `scheduler.crt`, `scheduler.key` and `ca.crt` in the pki dir of
+            whoever runs the scheduler, looked up when it connects.
         :param insecure: connect without TLS. Only for a worker started with
             `--insecure-localhost` on this machine.
         """
@@ -101,10 +102,11 @@ class Host:
         self._memory: int | None = None
         self.set_limits(cores, memory)
         self._port = port
-        default_cert, default_key = pki.paths(pki.SCHEDULER)
-        self._cert = Path(cert) if cert else default_cert
-        self._key = Path(key) if key else default_key
-        self._ca = Path(ca) if ca else pki.ca_path()
+        # NOTE: None for the defaults: a host compiled in a console must not
+        # carry the console user's paths to the scheduler.
+        self._cert = Path(cert) if cert else None
+        self._key = Path(key) if key else None
+        self._ca = Path(ca) if ca else None
         self._insecure = insecure
 
         self._connection = None
@@ -207,20 +209,24 @@ class Host:
                 config=PROTOCOL_CONFIG,
                 keepalive=True,
             )
-        for path in (self._cert, self._key, self._ca):
+        default_cert, default_key = pki.paths(pki.SCHEDULER)
+        cert = self._cert or default_cert
+        key = self._key or default_key
+        ca = self._ca or pki.ca_path()
+        for path in (cert, key, ca):
             if not path.exists():
                 raise FileNotFoundError(
                     f"{path} is missing. See `helper certs --help`."
                 )
-        pki.check_key_permissions(self._key)
+        pki.check_key_permissions(key)
         # NOTE: Passing cert_reqs explicitly keeps hostname checking on: the
         # worker's certificate must name `domain`.
         return rpyc.ssl_connect(
             self._domain,
             self._port,
-            keyfile=str(self._key),
-            certfile=str(self._cert),
-            ca_certs=str(self._ca),
+            keyfile=str(key),
+            certfile=str(cert),
+            ca_certs=str(ca),
             cert_reqs=ssl.CERT_REQUIRED,
             config=PROTOCOL_CONFIG,
             keepalive=True,
@@ -287,10 +293,13 @@ class Host:
                     f"{self._name}: {self._last_error}"
                 ) from e
 
+    # NOTE: Every call names the job's owner, whom the worker acts as.
+
     def launch(self, job: Job) -> None:
         self._call(
             "launch_job",
             job.id(),
+            job.owner(),
             job.cwd().as_posix(),
             job.command(),
             job.outdir().as_posix(),
@@ -300,17 +309,31 @@ class Host:
 
     def statuses(self, jobs: list[Job]) -> list[tuple]:
         """(status, returncode, message, start_time, end_time, memory) per
-        job; see `worker.resolve_status`."""
+        job; see `userio.resolve_status`."""
         if not jobs:
             return []
         results = self._call(
-            "job_statuses", tuple(job.outdir().as_posix() for job in jobs)
+            "job_statuses",
+            tuple((job.owner(), job.outdir().as_posix()) for job in jobs),
         )
         return [tuple(result) for result in results]
 
+    def finished_runs(self, jobs: list[Job]) -> list[tuple | None]:
+        """(job id, status) of the run that ended in each job's outdir,
+        or None; see `userio.finished_runs`."""
+        if not jobs:
+            return []
+        results = self._call(
+            "finished_runs",
+            tuple((job.owner(), job.outdir().as_posix()) for job in jobs),
+        )
+        return [
+            None if run is None else (run[0], tuple(run[1])) for run in results
+        ]
+
     def memory_trace(self, job: Job) -> list[dict]:
         """The job's memory samples; empty if the worker has none."""
-        data = self._call("memory_trace", job.outdir().as_posix())
+        data = self._call("memory_trace", job.owner(), job.outdir().as_posix())
         samples = []
         for line in bytes(data).decode(errors="replace").splitlines():
             try:
@@ -320,13 +343,17 @@ class Host:
         return samples
 
     def signal(self, job: Job, signum: int) -> bool:
-        return bool(self._call("signal_job", job.outdir().as_posix(), signum))
+        return bool(
+            self._call(
+                "signal_job", job.owner(), job.outdir().as_posix(), signum
+            )
+        )
 
     def read_file(
-        self, outdir: Path, label: str, offset: int, length: int
+        self, user: str, outdir: Path, label: str, offset: int, length: int
     ) -> bytes:
         return self._call(
-            "read_file", Path(outdir).as_posix(), label, offset, length
+            "read_file", user, Path(outdir).as_posix(), label, offset, length
         )
 
     def spec(self) -> dict:
@@ -337,9 +364,9 @@ class Host:
             "cores": self._cores,
             "memory": self._memory,
             "port": self._port,
-            "cert": str(self._cert),
-            "key": str(self._key),
-            "ca": str(self._ca),
+            "cert": str(self._cert) if self._cert else None,
+            "key": str(self._key) if self._key else None,
+            "ca": str(self._ca) if self._ca else None,
             "insecure": self._insecure,
         }
 

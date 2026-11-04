@@ -7,13 +7,18 @@ from pathlib import Path
 
 import pytest
 
-from experiment.api.worker import Worker, resolve_status
+from experiment.api.scheduler.scheduler import current_user
+from experiment.api.userio import resolve_status
+from experiment.api.worker import Worker
+
+ME = current_user()
 
 
 def launch(worker: Worker, tmp_path: Path, name: str, command: str) -> Path:
     outdir = tmp_path / name
     worker.exposed_launch_job(
         name,
+        ME,
         str(tmp_path),
         command,
         str(outdir),
@@ -43,7 +48,7 @@ def test_missing_cwd_fails_the_job(tmp_path):
     worker = Worker()
     outdir = tmp_path / "job"
     worker.exposed_launch_job(
-        "job", str(tmp_path / "nope"), "true", str(outdir), (), ()
+        "job", ME, str(tmp_path / "nope"), "true", str(outdir), (), ()
     )
     status, returncode, message, start, end, _ = wait_for(outdir, "failed")
     assert start is not None and end >= start
@@ -55,9 +60,9 @@ def test_signal_marks_job_killed(tmp_path, signum):
     worker = Worker()
     outdir = launch(worker, tmp_path, "sleep", "sleep 30")
     wait_for(outdir, "running")
-    assert worker.exposed_signal_job(str(outdir), int(signum))
+    assert worker.exposed_signal_job(ME, str(outdir), int(signum))
     wait_for(outdir, "killed")
-    assert not worker.exposed_signal_job(str(outdir), int(signum))
+    assert not worker.exposed_signal_job(ME, str(outdir), int(signum))
 
 
 def test_crash_is_failed_not_killed(tmp_path):
@@ -70,7 +75,7 @@ def test_crash_is_failed_not_killed(tmp_path):
 def test_status_survives_worker_restart(tmp_path):
     outdir = launch(Worker(), tmp_path, "sleep", "sleep 1")
     fresh = Worker()
-    assert fresh.exposed_job_statuses((str(outdir),))[0][0] == "running"
+    assert fresh.exposed_job_statuses(((ME, str(outdir)),))[0][0] == "running"
     wait_for(outdir, "exited")
 
 
@@ -83,23 +88,26 @@ def test_refuses_double_launch(tmp_path):
     outdir = launch(worker, tmp_path, "sleep", "sleep 30")
     with pytest.raises(RuntimeError):
         launch(worker, tmp_path, "sleep", "sleep 30")
-    worker.exposed_signal_job(str(outdir), int(signal.SIGKILL))
+    worker.exposed_signal_job(ME, str(outdir), int(signal.SIGKILL))
 
 
 def test_read_file_only_serves_job_files(tmp_path):
     worker = Worker()
     outdir = launch(worker, tmp_path, "echo", "echo hello")
     wait_for(outdir, "exited")
-    assert worker.exposed_read_file(str(outdir), "stdout", 0, 100) == b"hello\n"
-    assert worker.exposed_read_file(str(outdir), "stdout", 2, 2) == b"ll"
+    assert worker.exposed_read_file(ME, str(outdir), "stdout", 0, 100) == (
+        b"hello\n"
+    )
+    assert worker.exposed_read_file(ME, str(outdir), "stdout", 2, 2) == b"ll"
     with pytest.raises(PermissionError):
-        worker.exposed_read_file(str(outdir), "../../etc/passwd", 0, 100)
+        worker.exposed_read_file(ME, str(outdir), "../../etc/passwd", 0, 100)
 
 
 def test_files_outside_outdir_are_rejected(tmp_path):
     with pytest.raises(ValueError):
         Worker().exposed_launch_job(
             "job",
+            ME,
             str(tmp_path),
             "true",
             str(tmp_path / "job"),

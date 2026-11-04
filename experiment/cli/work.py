@@ -8,7 +8,7 @@ from pathlib import Path
 
 from rpyc.utils.server import ThreadedServer
 
-from ..api.worker import PROTOCOL_CONFIG, Worker
+from ..api.worker import DEFAULT_MIN_UID, PROTOCOL_CONFIG, Worker
 from ..common import pki
 from ..common.log import error, info, warn
 
@@ -45,6 +45,18 @@ def parse_work_args(args):
         "--insecure-localhost",
         action="store_true",
         help="No TLS; only listen on 127.0.0.1. For testing on one machine.",
+    )
+    parser.add_argument(
+        "--allow-gid",
+        type=int,
+        help="Run by root: launch jobs for members of this group, each as "
+        "its owner (required then).",
+    )
+    parser.add_argument(
+        "--min-uid",
+        type=int,
+        default=DEFAULT_MIN_UID,
+        help="Run by root: never launch for users below this uid.",
     )
     return parser.parse_known_args(args)
 
@@ -83,8 +95,13 @@ def _process_work_args(known_args, unknown_args) -> int:
         authenticator = pki.RoleAuthenticator(cert, key, ca, pki.SCHEDULER)
 
     try:
+        worker = Worker(known_args.allow_gid, known_args.min_uid)
+    except ValueError as e:
+        error(f"{e}; pass --allow-gid.")
+        return 2
+    try:
         server = ThreadedServer(
-            Worker(),
+            worker,
             hostname=bind,
             port=known_args.port,
             authenticator=authenticator,

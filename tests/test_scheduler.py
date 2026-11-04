@@ -26,6 +26,10 @@ class FakeRoot:
         self.status: dict[str, str] = {}
         self.signals: list[tuple[str, int]] = []
         self.fail_launch: set[str] = set()
+        # NOTE: Who each launch was for.
+        self.users: list[str | None] = []
+        # NOTE: outdir -> (job id, status) of a run that ended there.
+        self.finished: dict[str, tuple] = {}
         self.down = False
 
     def _check(self):
@@ -41,24 +45,29 @@ class FakeRoot:
         self._check()
         return 64, 1 << 40, 1 << 40
 
-    def memory_trace(self, outdir):
+    def memory_trace(self, user, outdir):
         return b""
 
-    def launch_job(self, job_id, cwd, command, outdir, files, dumps):
+    def launch_job(self, job_id, user, cwd, command, outdir, files, dumps):
         self._check()
+        self.users.append(user)
         if job_id in self.fail_launch:
             raise RemoteError("could not launch")
         self.status[outdir] = "running"
         return 1234
 
-    def job_statuses(self, outdirs):
+    def job_statuses(self, jobs):
         self._check()
         return tuple(
             (self.status.get(outdir, "missing"), None, None, None, None, None)
-            for outdir in outdirs
+            for _, outdir in jobs
         )
 
-    def signal_job(self, outdir, signum):
+    def finished_runs(self, jobs):
+        self._check()
+        return tuple(self.finished.get(outdir) for _, outdir in jobs)
+
+    def signal_job(self, user, outdir, signum):
         self._check()
         self.signals.append((outdir, signum))
         if self.status.get(outdir) != "running":
@@ -300,9 +309,9 @@ def test_watcher_retries_then_gives_up(tmp_path):
         return original(*args)
 
     root.launch_job = count_launch
-    root.job_statuses = lambda outdirs: tuple(
+    root.job_statuses = lambda jobs: tuple(
         (root.status.get(o, "missing"), 1, "watcher: flaky", None, None, None)
-        for o in outdirs
+        for _, o in jobs
     )
     scheduler._tick()
     for attempt in range(1, job.max_retries + 2):
@@ -386,9 +395,9 @@ def test_jobs_only_run_on_compatible_hosts(tmp_path):
 def test_start_and_end_times_come_from_the_worker(tmp_path):
     root = FakeRoot()
     times = {}
-    root.job_statuses = lambda outdirs: tuple(
+    root.job_statuses = lambda jobs: tuple(
         (root.status.get(o, "missing"), 0, None, *times.get(o, (None, None)), None)
-        for o in outdirs
+        for _, o in jobs
     )
     experiment = make_experiment("e", 1, tmp_path)
     store = StateStore("test")

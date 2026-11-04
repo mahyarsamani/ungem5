@@ -3,6 +3,11 @@
 One scheduler runs per user per machine (see `state.InstanceLock`). Consoles
 talk to it over a Unix socket in the user's private runtime directory; the
 socket also checks that the peer runs as the same user.
+
+A lab scheduler (`--lab`) is a system service that serves every member of
+one group: consoles connect to a socket anyone can open, the kernel tells
+the scheduler which user is on the other end, and that user is who every
+command comes from.
 """
 
 import argparse
@@ -10,6 +15,7 @@ import json
 import logging
 import os
 import platform
+import pwd
 import signal
 import socket
 import struct
@@ -26,10 +32,12 @@ import rpyc
 from rpyc.utils.authenticators import AuthenticationError
 from rpyc.utils.server import ThreadedServer
 
+from rpyc.utils.helpers import classpartial
+
 from ...common.log import error, info, install_warning_format
 from ..worker import PROTOCOL_CONFIG
 from .dashboard import Dashboard
-from .scheduler import CommandError, Scheduler
+from .scheduler import Caller, CommandError, Scheduler
 from .state import InstanceLock, StateStore, socket_path, state_dir
 
 DEFAULT_DASHBOARD_PORT = 9200
@@ -37,27 +45,56 @@ DEFAULT_POLLING_SECS = 1.0
 
 
 class PeerUidAuthenticator:
-    """Only accept Unix-socket peers running as this user."""
+    """Accept Unix-socket peers running as this user or, given
+    `allow_gid`, as any user but root in that group."""
+
+    def __init__(self, allow_gid: int | None = None) -> None:
+        self._allow_gid = allow_gid
 
     def __call__(self, sock):
         creds = sock.getsockopt(
             socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
         )
         _, uid, _ = struct.unpack("3i", creds)
-        if uid != os.getuid():
-            raise AuthenticationError(f"uid {uid} may not control this scheduler")
-        return sock, {"uid": uid}
+        try:
+            account = pwd.getpwuid(uid)
+        except KeyError:
+            raise AuthenticationError(f"uid {uid} has no account") from None
+        if self._allow_gid is None:
+            allowed = uid == os.getuid()
+        else:
+            allowed = uid != 0 and self._allow_gid in os.getgrouplist(
+                account.pw_name, account.pw_gid
+            )
+        if not allowed:
+            raise AuthenticationError(
+                f"{account.pw_name} may not use this scheduler"
+            )
+        return sock, {"uid": uid, "user": account.pw_name}
 
 
 class ControlService(rpyc.Service):
-    """What consoles can do. Everything crosses as JSON strings."""
+    """What a console can do, as the user on the other end of its
+    connection. Everything crosses as JSON strings."""
 
-    def __init__(self, scheduler: Scheduler) -> None:
+    def __init__(self, scheduler: Scheduler, dashboard: Dashboard) -> None:
         super().__init__()
         self._scheduler = scheduler
+        self._dashboard = dashboard
+        self._caller: Caller | None = None
+
+    def on_connect(self, conn) -> None:
+        self._caller = self._scheduler.caller(
+            conn._config["credentials"]["user"]
+        )
 
     def exposed_snapshot(self) -> str:
-        return json.dumps(self._scheduler.snapshot().to_dict())
+        data = self._scheduler.snapshot().to_dict()
+        data["you"] = {"user": self._caller.user, "admin": self._caller.admin}
+        data["info"] = dict(
+            data["info"], dashboard_url=self._dashboard.url(self._caller.user)
+        )
+        return json.dumps(data)
 
     def exposed_events(self, since: int) -> str:
         return json.dumps(self._scheduler.events().since(int(since)))
@@ -68,7 +105,10 @@ class ControlService(rpyc.Service):
     def exposed_execute(self, name: str, kwargs_json: str) -> str:
         try:
             lines = self._scheduler.call(
-                str(name), timeout=300, **json.loads(kwargs_json)
+                str(name),
+                timeout=300,
+                caller=self._caller,
+                **json.loads(kwargs_json),
             )
         except CommandError as e:
             # NOTE: A builtin exception type crosses rpyc cleanly.
@@ -111,7 +151,18 @@ def run_daemon(
     polling_secs: float = DEFAULT_POLLING_SECS,
     fresh: bool = False,
     log_to_stderr: bool = False,
+    lab_gid: int | None = None,
+    admins: tuple[str, ...] = (),
+    socket_file: Path | None = None,
 ) -> int:
+    """Run the scheduler until it is stopped. With `lab_gid`, it is a lab
+    scheduler for the members of that group, `admins` among them; its
+    socket (`socket_file`) is open to everyone, who are checked when they
+    connect."""
+    lab = lab_gid is not None
+    if lab and socket_file is None:
+        error("A lab scheduler needs --socket.")
+        return 2
     lock = InstanceLock()
     if not lock.acquire(
         {
@@ -130,14 +181,16 @@ def run_daemon(
         )
         return 1
 
-    sock_path = socket_path()
+    sock_path = socket_file or socket_path()
     control = None
     dashboard = None
     serving = False
     try:
         store = StateStore(name)
         logger = _setup_logging(store.directory(), name, log_to_stderr)
-        scheduler = Scheduler(name, polling_secs, store, logger)
+        scheduler = Scheduler(
+            name, polling_secs, store, logger, lab=lab, admins=admins
+        )
 
         dashboard = Dashboard(
             scheduler, dashboard_port, f"Scheduler {name}@{platform.node()}"
@@ -145,7 +198,6 @@ def run_daemon(
         scheduler.set_info(
             pid=os.getpid(),
             host=platform.node(),
-            dashboard_url=dashboard.url(),
             dashboard_port=dashboard_port,
             polling_secs=polling_secs,
             state_file=str(store.path()),
@@ -165,13 +217,14 @@ def run_daemon(
         # NOTE: We hold the lock, so any socket file left here is stale.
         sock_path.unlink(missing_ok=True)
         control = ThreadedServer(
-            ControlService(scheduler),
+            classpartial(ControlService, scheduler, dashboard),
             socket_path=str(sock_path),
-            authenticator=PeerUidAuthenticator(),
+            authenticator=PeerUidAuthenticator(lab_gid),
             protocol_config=PROTOCOL_CONFIG,
             logger=logging.getLogger(f"{name}.control"),
         )
-        os.chmod(sock_path, 0o600)
+        # NOTE: In a lab anyone may connect; the authenticator decides.
+        os.chmod(sock_path, 0o666 if lab else 0o600)
 
         threads = [
             threading.Thread(
@@ -198,8 +251,8 @@ def run_daemon(
             signal.signal(signum, request_stop)
 
         scheduler.events().info(
-            f"Scheduler {name} running (pid {os.getpid()}). "
-            f"Dashboard: {dashboard.url()}"
+            f"Scheduler {name} running (pid {os.getpid()})"
+            + (f" for group {lab_gid}." if lab else ".")
         )
         while not scheduler.wait_stopped(0.5):
             pass
@@ -286,6 +339,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--fresh", action="store_true")
     parser.add_argument("--foreground", action="store_true")
+    parser.add_argument(
+        "--lab",
+        type=int,
+        metavar="GID",
+        help="Serve every member of this group (a lab scheduler).",
+    )
+    parser.add_argument(
+        "--admin",
+        action="append",
+        default=[],
+        help="A lab user who may change hosts, partitions and anyone's "
+        "jobs; repeat for several.",
+    )
+    parser.add_argument(
+        "--socket", type=Path, help="The control socket (lab only)."
+    )
     args = parser.parse_args(argv)
     return run_daemon(
         args.name,
@@ -293,6 +362,9 @@ def main(argv: list[str] | None = None) -> int:
         args.polling_secs,
         args.fresh,
         log_to_stderr=args.foreground,
+        lab_gid=args.lab,
+        admins=tuple(args.admin),
+        socket_file=args.socket,
     )
 
 

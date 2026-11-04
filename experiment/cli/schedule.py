@@ -8,7 +8,7 @@ from ..api.scheduler.daemon import (
     run_daemon,
     spawn_daemon,
 )
-from ..api.scheduler.state import InstanceLock
+from ..api.scheduler.state import LAB_SOCKET, InstanceLock
 from ..common.log import error, info, warn
 
 
@@ -95,6 +95,12 @@ def parse_console_args(args):
         prog="helper console",
         description="Attach a console to the running scheduler.",
     )
+    parser.add_argument(
+        "--lab",
+        action="store_true",
+        help=f"Attach to the lab scheduler ({LAB_SOCKET}) instead of your "
+        "own.",
+    )
     return parser.parse_known_args(args)
 
 
@@ -102,6 +108,12 @@ def _process_console_args(known_args, unknown_args) -> int:
     if unknown_args:
         error(f"unrecognized arguments: {' '.join(unknown_args)}")
         return 2
+    if known_args.lab:
+        client = ControlClient(LAB_SOCKET)
+        if not client.connect():
+            error(f"Can't reach the lab scheduler at {LAB_SOCKET}.")
+            return 1
+        return run_console(client, {"name": "lab"}, lab=True)
     client = ControlClient()
     if not client.connect():
         error("No scheduler is running. Start one with `helper schedule`.")

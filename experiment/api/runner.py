@@ -1,14 +1,15 @@
 """Runs one job and records how it ended.
 
-The worker launches this module as the leader of a new process group:
+The worker launches this module, as the job's owner:
 
     python -m experiment.api.runner --outdir D --cwd C --job-id I -- <command>
 
-It runs `<command>` with bash, sends its output to D/stdout and D/stderr and,
-when the command ends, atomically writes D/.job/exit.json. Together with the
-D/.job/launch.json that the worker writes, this lets anyone (a restarted
-worker, a restarted scheduler) tell whether the job is running, finished,
-failed, or was killed, without having been its parent.
+The runner leads its own process group, writes D/.job/launch.json (its pid
+and start time) and logs to D/.job/runner.log. It runs `<command>` with
+bash, sends its output to D/stdout and D/stderr and, when the command ends,
+atomically writes D/.job/exit.json. These two records let anyone (a
+restarted worker, a restarted scheduler) tell whether the job is running,
+finished, failed, or was killed, without having been its parent.
 
 Signals are delivered to the whole process group by the worker, so the
 runner only notes which signal it received (to tell "killed on request" from
@@ -53,6 +54,7 @@ MEMORY_TRACE_FILE = "memory.jsonl"
 WATCHER_FILE = "watcher"
 WATCHER_CONFIG_FILE = "watcher.json"
 WATCHER_LOG_FILE = "watcher.log"
+RUNNER_LOG_FILE = "runner.log"
 
 DEFAULT_MEMORY_INTERVAL = 120
 
@@ -258,6 +260,27 @@ def main(argv: list[str] | None = None) -> int:
 
     job_dir = args.outdir / JOB_DIR
     job_dir.mkdir(parents=True, exist_ok=True)
+    log = open(job_dir / RUNNER_LOG_FILE, "w")
+    os.dup2(log.fileno(), 1)
+    os.dup2(log.fileno(), 2)
+    # NOTE: Lead a process group, so a signal reaches the whole job. A
+    # worker's child or a systemd unit's main process may already lead one.
+    if os.getpgid(0) != os.getpid():
+        os.setsid()
+    import psutil
+
+    write_json_atomic(
+        job_dir / LAUNCH_FILE,
+        {
+            "job_id": args.job_id,
+            "pid": os.getpid(),
+            "pgid": os.getpgid(0),
+            "create_time": psutil.Process().create_time(),
+            "start_time": time.time(),
+            "cwd": str(args.cwd),
+            "command": command,
+        },
+    )
     watcher = Watcher.load(job_dir, args.outdir, args.job_id)
     process = read_json(job_dir / PROCESS_FILE) or {}
     nice = int(process.get("nice", 0))

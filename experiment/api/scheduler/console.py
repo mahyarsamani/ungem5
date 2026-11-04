@@ -64,7 +64,10 @@ class _HelpShown(Exception):
 
 
 class ControlClient:
-    def __init__(self) -> None:
+    def __init__(self, path: Path | None = None) -> None:
+        """A client of the scheduler listening on `path`, by default this
+        user's own."""
+        self._path = path or socket_path()
         self._conn = None
         self._lock = threading.RLock()
         self._snapshot: dict | None = None
@@ -76,7 +79,7 @@ class ControlClient:
                 return True
             try:
                 self._conn = rpyc.utils.factory.unix_connect(
-                    str(socket_path()), config=PROTOCOL_CONFIG
+                    str(self._path), config=PROTOCOL_CONFIG
                 )
             except (OSError, EOFError):
                 self._conn = None
@@ -286,6 +289,17 @@ def build_parser() -> tuple[ConsoleParser, dict[str, ConsoleParser]]:
         help="A size like 200G, or auto for 90%% of the host's memory.",
     )
 
+    p = add(
+        "partition",
+        "Give a user a share of a host (admins only); `*` is everyone "
+        "without a share of their own.",
+    )
+    _arg(p, "host", completer="host")
+    _arg(p, "user")
+    _arg(p, "--cores", help="N, or none for no limit.")
+    _arg(p, "--memory", help="A size like 64G, or none for no limit.")
+    _arg(p, "--clear", action="store_true", help="Take the share away.")
+
     p = add("events", "Show recent scheduler events.")
     _arg(p, "-n", type=int, default=20, help="How many.")
 
@@ -444,11 +458,12 @@ def table(headers: list[str], rows: list[list], max_width: int = 60) -> str:
 
 
 def short_ids(ids: list[str]) -> dict[str, str]:
-    """Shortest prefix (at least SHORT_ID long) that is unique among ids."""
+    """Shortest prefix (at least SHORT_ID long, after a lab's "<user>/")
+    that is unique among ids."""
     result = {}
     ordered = sorted(ids)
     for i, job_id in enumerate(ordered):
-        length = SHORT_ID
+        length = SHORT_ID + job_id.find("/") + 1
         for neighbor in ordered[max(0, i - 1) : i] + ordered[i + 1 : i + 2]:
             common = len(os.path.commonprefix([job_id, neighbor]))
             length = max(length, common + 1)
@@ -468,8 +483,13 @@ def format_event(event) -> str:
 
 
 class Console:
-    def __init__(self, client: ControlClient, restart_args: dict) -> None:
+    def __init__(
+        self, client: ControlClient, restart_args: dict, lab: bool = False
+    ) -> None:
+        """`lab`: the console of a lab scheduler, a service that consoles
+        neither start nor stop."""
         self._client = client
+        self._lab = lab
         self._restart_args = dict(restart_args)
         self._parser, self._commands = build_parser()
         self._last_seq = 0
@@ -558,11 +578,15 @@ class Console:
                     self._client.close()
                 delay = 1.0
                 continue
-            if not self._told_not_running and InstanceLock().is_free():
+            if not self._told_not_running and (
+                self._lab or InstanceLock().is_free()
+            ):
                 self._told_not_running = True
                 print(
-                    "warn: the scheduler is not running. Type `start` to "
-                    "start it again (it resumes from its saved state)."
+                    "warn: the lab scheduler is not running; ask an admin."
+                    if self._lab
+                    else "warn: the scheduler is not running. Type `start` "
+                    "to start it again (it resumes from its saved state)."
                 )
             delay = min(delay * 2, 5.0)
 
@@ -609,6 +633,15 @@ class Console:
             if hosts
             else "no hosts"
         )
+        for h in hosts:
+            for user, share in sorted(h["partitions"].items()):
+                held = h["users"].get(user, {"cores": 0, "memory": 0})
+                print(
+                    f"  {h['name']}: {user} holds {held['cores']}/"
+                    f"{share['cores'] if share['cores'] is not None else 'any'}"
+                    f" cores, {format_size(held['memory'])}/"
+                    f"{format_size(share['memory']) if share['memory'] is not None else 'any'}"
+                )
 
     def _print_experiments(self, _args) -> None:
         experiments = self._client.snapshot(max_age=0)["experiments"]
@@ -735,6 +768,12 @@ class Console:
             "%Y-%m-%d %H:%M:%S"
         )
         print(f"scheduler   {info.get('name')} (pid {info.get('pid')}), started {started}")
+        if info.get("lab"):
+            you = self._client.snapshot()["you"]
+            print(
+                f"you         {you['user']}"
+                + (" (admin)" if you["admin"] else "")
+            )
         print(f"dashboard   {info.get('dashboard_url')}")
         print(f"state file  {info.get('state_file')}")
         print(f"logs        {info.get('log_dir')}")
@@ -745,6 +784,8 @@ class Console:
         if self._client.connected() or self._client.connect():
             print("the scheduler is already running")
             return
+        if self._lab:
+            raise ConsoleError("the lab scheduler is a service; ask an admin")
         if spawn_daemon(**self._restart_args) and self._client.connect():
             self._on_connected()
             self._last_seq = 0
@@ -816,7 +857,8 @@ class Console:
         """Compile `script` here, as this user, and send the scheduler
         what it defines."""
         snapshot = self._client.snapshot(max_age=0)
-        if command == "load" and str(script) in snapshot["info"]["scripts"]:
+        key = f"{snapshot['you']['user']}:{script}" if self._lab else str(script)
+        if command == "load" and key in snapshot["info"]["scripts"]:
             raise ConsoleError(
                 f"{script} is already loaded; use `reload` to pick up changes"
             )
@@ -870,7 +912,11 @@ class Console:
         if not self._client.connected():
             raise ConsoleError(
                 "not connected to the scheduler"
-                + ("; type `start` to start it" if InstanceLock().is_free() else "")
+                + (
+                    "; type `start` to start it"
+                    if not self._lab and InstanceLock().is_free()
+                    else ""
+                )
             )
         views = {
             "hosts": self._print_hosts,
@@ -907,6 +953,15 @@ class Console:
         elif canonical == "capacity":
             self._execute(
                 "capacity", host=args.host, cores=args.cores, memory=args.memory
+            )
+        elif canonical == "partition":
+            self._execute(
+                "partition",
+                host=args.host,
+                user=args.user,
+                cores=args.cores,
+                memory=args.memory,
+                clear=args.clear,
             )
         elif canonical == "memory":
             self._execute("memory", job=args.job)
@@ -972,5 +1027,7 @@ class Console:
         return 0
 
 
-def run_console(client: ControlClient, restart_args: dict) -> int:
-    return Console(client, restart_args).run()
+def run_console(
+    client: ControlClient, restart_args: dict, lab: bool = False
+) -> int:
+    return Console(client, restart_args, lab).run()

@@ -4,39 +4,41 @@ Everything the worker needs to know about a job lives in the job's outdir
 (see `runner.py`), so the worker can be restarted while jobs run. Exposed
 methods take and return only immutable builtins (str, int, float, bytes,
 tuples) so rpyc passes them by value rather than as remote references.
+
+Every job has an owner, a user name. A worker run by a user launches only
+that user's jobs, as its own children. A worker run by root (the lab setup)
+launches each job as its owner, in a transient systemd unit of its own in
+the slice experiment-<owner>.slice, so jobs outlive the worker and get their
+own cgroup; owners must have a uid of at least `min_uid` and be in the group
+`allow_gid`. Either way, a job's files are only ever touched as its owner
+(see `userio.py`).
 """
 
+import hashlib
 import os
+import pwd
+import re
 import signal as signal_module
 import subprocess
 import sys
 import threading
 import time
 
-from pathlib import Path
-
 import psutil
 import rpyc
 
-from .runner import (
-    EXIT_FILE,
-    FILES_FILE,
-    JOB_DIR,
-    LAUNCH_FILE,
-    MEMORY_FILE,
-    MEMORY_TRACE_FILE,
-    read_json,
-    write_json_atomic,
-)
+from .userio import HelperIO, LocalIO, leader_alive
 
-MAX_READ = 1 << 20
-MAX_TRACE = 8 << 20
 ALLOWED_SIGNALS = {
     int(signal_module.SIGTERM),
     int(signal_module.SIGINT),
     int(signal_module.SIGQUIT),
     int(signal_module.SIGKILL),
 }
+# NOTE: Lowest uid a root worker launches for; below are system accounts.
+DEFAULT_MIN_UID = 1000
+# NOTE: How long a launch waits for the runner to write launch.json.
+LAUNCH_WAIT_SECS = 15
 
 PROTOCOL_CONFIG = {
     "allow_public_attrs": False,
@@ -48,101 +50,34 @@ PROTOCOL_CONFIG = {
 }
 
 
-def _job_dir(outdir: Path) -> Path:
-    return outdir / JOB_DIR
+def unit_name(user: str) -> str:
+    """A user name as it appears in systemd unit names; "-" would nest
+    slices, so anything but letters, digits and "_" becomes "_"."""
+    return re.sub(r"[^A-Za-z0-9_]", "_", user)
 
 
-def _inside(path: Path, root: Path) -> bool:
-    return path.resolve().is_relative_to(root.resolve())
-
-
-def _leader_alive(launch: dict) -> bool:
-    """Is the process recorded in launch.json still the same live process?"""
-    try:
-        proc = psutil.Process(launch["pid"])
-        # NOTE: Guards against the pid having been reused by another process.
-        if abs(proc.create_time() - launch["create_time"]) > 1.0:
-            return False
-        return proc.status() not in (psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD)
-    except psutil.NoSuchProcess:
-        return False
-    except psutil.AccessDenied:
-        return True
-
-
-Memory = tuple[int | None, int | None] | None
-Status = tuple[
-    str, int | None, str | None, float | None, float | None, Memory
-]
-
-
-def _sampled_memory(job_dir: Path) -> Memory:
-    latest = read_json(job_dir / MEMORY_FILE)
-    if latest is None:
-        return None
-    return latest.get("rss"), latest.get("peak")
-
-
-def resolve_status(outdir: Path) -> Status:
-    """Returns (status, returncode, message, start_time, end_time, memory)
-    for the job in `outdir`. Times are epoch seconds on this machine's
-    clock; memory is (bytes resident now, peak bytes so far), with None
-    for "now" once the job ended, or None if nothing was measured.
-
-    status is one of "missing", "running", "exited", "failed", "killed",
-    and "retry" (the job's watcher asked for it to be queued again).
-    """
-    job_dir = _job_dir(outdir)
-    launch = read_json(job_dir / LAUNCH_FILE)
-    if launch is None:
-        return "missing", None, None, None, None, None
-    start = launch.get("start_time")
-
-    def from_exit(record: dict) -> Status:
-        rc = record.get("returncode")
-        end = record.get("end_time")
-        peak = (record.get("memory") or {}).get("peak")
-        memory = (None, peak) if peak is not None else None
-        verdict = record.get("watcher")
-        if verdict:
-            status = "retry" if verdict["action"] == "retry" else "failed"
-            message = f"watcher: {verdict['message']}"
-            return status, rc, message, start, end, memory
-        if rc == 0:
-            return "exited", rc, None, start, end, memory
-        if rc is not None and rc < 0 and -rc in record.get(
-            "signals_received", []
-        ):
-            message = f"stopped by signal {-rc}"
-            return "killed", rc, message, start, end, memory
-        if rc is not None and rc < 0:
-            message = f"terminated by signal {-rc}"
-            return "failed", rc, message, start, end, memory
-        return "failed", rc, record.get("error"), start, end, memory
-
-    record = read_json(job_dir / EXIT_FILE)
-    if record is not None:
-        return from_exit(record)
-    if _leader_alive(launch):
-        return "running", None, None, start, None, _sampled_memory(job_dir)
-    # NOTE: The runner may have written exit.json right after our first look.
-    record = read_json(job_dir / EXIT_FILE)
-    if record is not None:
-        return from_exit(record)
-    sampled = _sampled_memory(job_dir)
-    return (
-        "killed",
-        None,
-        "ended without an exit record (e.g. SIGKILL)",
-        start,
-        None,
-        (None, sampled[1]) if sampled else None,
-    )
+def _status(result) -> tuple:
+    """A status from userio (lists, if it crossed as JSON) as tuples."""
+    *head, memory = result
+    return (*head, tuple(memory) if memory is not None else None)
 
 
 class Worker(rpyc.Service):
-    def __init__(self) -> None:
+    def __init__(
+        self, allow_gid: int | None = None, min_uid: int = DEFAULT_MIN_UID
+    ) -> None:
         super().__init__()
+        self._root = os.geteuid() == 0
+        if self._root and allow_gid is None:
+            raise ValueError(
+                "a worker run by root needs the group whose members may run "
+                "jobs (allow_gid)"
+            )
+        self._allow_gid = allow_gid
+        self._min_uid = min_uid
+        self._user = pwd.getpwuid(os.getuid()).pw_name
+        self._local = LocalIO()
+        self._helpers: dict[str, HelperIO] = dict()
         self._children: dict[str, subprocess.Popen] = dict()
         self._lock = threading.Lock()
 
@@ -154,6 +89,38 @@ class Worker(rpyc.Service):
                 if child.poll() is not None:
                     del self._children[key]
 
+    def _account(self, user: str) -> pwd.struct_passwd:
+        """`user`'s account, if this worker may run jobs for them."""
+        try:
+            account = pwd.getpwnam(str(user))
+        except KeyError:
+            raise PermissionError(f"no user {user!r} on this host") from None
+        if not self._root:
+            if account.pw_uid != os.getuid():
+                raise PermissionError(
+                    f"this worker runs as {self._user} and runs only their "
+                    f"jobs, not {user}'s"
+                )
+            return account
+        if account.pw_uid == 0 or account.pw_uid < self._min_uid:
+            raise PermissionError(f"{user} may not run jobs here")
+        if self._allow_gid not in os.getgrouplist(user, account.pw_gid):
+            raise PermissionError(
+                f"{user} is not in group {self._allow_gid}, so may not run "
+                "jobs here"
+            )
+        return account
+
+    def _io(self, user: str) -> "LocalIO | HelperIO":
+        self._account(user)
+        if not self._root:
+            return self._local
+        with self._lock:
+            helper = self._helpers.get(user)
+            if helper is None:
+                helper = self._helpers[user] = HelperIO(user)
+        return helper
+
     def exposed_ping(self) -> str:
         return os.uname().nodename
 
@@ -163,130 +130,163 @@ class Worker(rpyc.Service):
         memory = psutil.virtual_memory()
         return os.cpu_count() or 1, memory.total, memory.available
 
-    def exposed_memory_trace(self, outdir: str) -> bytes:
-        """The job's memory samples, one JSON object per line (the last
-        MAX_TRACE bytes of them)."""
-        path = _job_dir(Path(outdir)) / MEMORY_TRACE_FILE
-        try:
-            with open(path, "rb") as f:
-                size = f.seek(0, os.SEEK_END)
-                f.seek(max(0, size - MAX_TRACE))
-                data = f.read()
-        except FileNotFoundError:
-            return b""
-        if size > MAX_TRACE:
-            # NOTE: Drop the partial first line.
-            data = data.partition(b"\n")[2]
-        return data
+    def exposed_memory_trace(self, user: str, outdir: str) -> bytes:
+        """The job's memory samples, one JSON object per line."""
+        return self._io(user).call("memory_trace", str(outdir))
 
     def exposed_launch_job(
         self,
         job_id: str,
+        user: str,
         cwd: str,
         command: str,
         outdir: str,
         files: tuple,
         dumps: tuple,
     ) -> int:
+        """Launch the job as `user`; returns its runner's pid."""
         self._reap()
-        out = Path(outdir)
-        if not out.is_absolute() or not Path(cwd).is_absolute():
-            raise ValueError("cwd and outdir must be absolute paths")
-        job_dir = _job_dir(out)
-        job_dir.mkdir(parents=True, exist_ok=True)
-
-        status = resolve_status(out)[0]
-        if status == "running":
-            raise RuntimeError(f"a job is already running in {out}")
-        for name in (LAUNCH_FILE, EXIT_FILE, MEMORY_FILE, MEMORY_TRACE_FILE):
-            (job_dir / name).unlink(missing_ok=True)
-
-        allowed = {}
-        for label, path in tuple(files):
-            p = Path(path)
-            if not _inside(p, out):
-                raise ValueError(f"file {label}={p} is outside {out}")
-            allowed[str(label)] = str(p)
-        for content, path in tuple(dumps):
-            p = Path(path)
-            if not _inside(p, out):
-                raise ValueError(f"dump {p} is outside {out}")
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(str(content))
-        write_json_atomic(job_dir / FILES_FILE, allowed)
-
-        with open(job_dir / "runner.log", "w") as runner_log:
+        account = self._account(user)
+        io = self._io(user)
+        outdir, job_id = str(outdir), str(job_id)
+        io.call(
+            "prepare",
+            outdir,
+            str(cwd),
+            [[str(label), str(path)] for label, path in tuple(files)],
+            [[str(content), str(path)] for content, path in tuple(dumps)],
+        )
+        runner = [
+            sys.executable,
+            "-m",
+            "experiment.api.runner",
+            "--outdir",
+            outdir,
+            "--cwd",
+            str(cwd),
+            "--job-id",
+            job_id,
+            "--",
+            str(command),
+        ]
+        child = None
+        if self._root:
+            unit = self._start_unit(account, outdir, runner)
+            where = f"`journalctl -u {unit}`"
+        else:
+            # NOTE: Until the runner redirects its own output, a failure
+            # to start shows in this worker's output.
             child = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "experiment.api.runner",
-                    "--outdir",
-                    str(out),
-                    "--cwd",
-                    str(cwd),
-                    "--job-id",
-                    str(job_id),
-                    "--",
-                    str(command),
-                ],
+                runner,
                 stdin=subprocess.DEVNULL,
-                stdout=runner_log,
-                stderr=runner_log,
                 start_new_session=True,
                 close_fds=True,
             )
-        try:
-            create_time = psutil.Process(child.pid).create_time()
-        except psutil.Error:
-            create_time = time.time()
-        write_json_atomic(
-            job_dir / LAUNCH_FILE,
-            {
-                "job_id": str(job_id),
-                "pid": child.pid,
-                "pgid": child.pid,
-                "create_time": create_time,
-                "start_time": time.time(),
-                "cwd": str(cwd),
-                "command": str(command),
-            },
+            with self._lock:
+                self._children[outdir] = child
+            where = "this worker's output"
+        deadline = time.time() + LAUNCH_WAIT_SECS
+        while time.time() < deadline:
+            record = io.call("launch_record", outdir)
+            if record is not None and record.get("job_id") == job_id:
+                return int(record["pid"])
+            if child is not None and child.poll() is not None:
+                break
+            time.sleep(0.05)
+        raise RuntimeError(
+            f"the runner of {job_id[:12]} did not start; see "
+            f"{outdir}/.job/runner.log or {where}"
         )
-        with self._lock:
-            self._children[str(out)] = child
-        return child.pid
 
-    def exposed_job_statuses(self, outdirs: tuple) -> tuple:
+    def _start_unit(
+        self, account: pwd.struct_passwd, outdir: str, runner: list[str]
+    ) -> str:
+        user = unit_name(account.pw_name)
+        digest = hashlib.sha1(f"{outdir} {time.time()}".encode()).hexdigest()
+        unit = f"experiment-{user}-{digest[:12]}"
+        result = subprocess.run(
+            [
+                "systemd-run",
+                "--quiet",
+                "--collect",
+                f"--unit={unit}",
+                f"--slice=experiment-{user}.slice",
+                f"--uid={account.pw_uid}",
+                f"--gid={account.pw_gid}",
+                "--",
+                *runner,
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"systemd-run failed: {result.stderr.strip() or result.returncode}"
+            )
+        return unit
+
+    def _per_user(self, operation: str, jobs: tuple) -> list:
+        """`operation` on the outdirs of ((user, outdir), ...), each as its
+        user; results in the order of `jobs`."""
+        jobs = [(str(user), str(outdir)) for user, outdir in tuple(jobs)]
+        by_user: dict[str, list[int]] = {}
+        for index, (user, _) in enumerate(jobs):
+            by_user.setdefault(user, []).append(index)
+        results: list = [None] * len(jobs)
+        for user, indices in by_user.items():
+            answers = self._io(user).call(
+                operation, [jobs[index][1] for index in indices]
+            )
+            for index, answer in zip(indices, answers):
+                results[index] = answer
+        return results
+
+    def exposed_job_statuses(self, jobs: tuple) -> tuple:
+        """Statuses of ((user, outdir), ...); see `userio.resolve_status`."""
         self._reap()
-        return tuple(resolve_status(Path(outdir)) for outdir in tuple(outdirs))
+        return tuple(_status(s) for s in self._per_user("statuses", jobs))
 
-    def exposed_signal_job(self, outdir: str, signum: int) -> bool:
+    def exposed_finished_runs(self, jobs: tuple) -> tuple:
+        """For ((user, outdir), ...): (job id, status) of the run that
+        ended in each outdir, or None; see `userio.finished_runs`."""
+        return tuple(
+            None if run is None else (str(run[0]), _status(run[1]))
+            for run in self._per_user("finished_runs", jobs)
+        )
+
+    def exposed_signal_job(self, user: str, outdir: str, signum: int) -> bool:
         """Returns False if the job wasn't running (nothing to signal)."""
         signum = int(signum)
         if signum not in ALLOWED_SIGNALS:
             raise ValueError(f"signal {signum} is not allowed")
-        launch = read_json(_job_dir(Path(outdir)) / LAUNCH_FILE)
-        if launch is None or not _leader_alive(launch):
+        account = self._account(user)
+        launch = self._io(user).call("launch_record", str(outdir))
+        if launch is None or not leader_alive(launch):
             return False
+        # NOTE: The owner wrote launch.json, so check that it names their
+        # own process group before signalling it, as root or not.
         try:
-            os.killpg(launch["pgid"], signum)
+            leader = psutil.Process(launch["pid"])
+            owner = leader.uids().real
+            pgid = os.getpgid(launch["pid"])
+        except (psutil.NoSuchProcess, ProcessLookupError):
+            return False
+        if owner != account.pw_uid or pgid != launch["pgid"]:
+            raise PermissionError(
+                f"the launch record in {outdir} names a process group "
+                f"{user} doesn't lead"
+            )
+        try:
+            os.killpg(pgid, signum)
         except ProcessLookupError:
             return False
         return True
 
     def exposed_read_file(
-        self, outdir: str, label: str, offset: int, length: int
+        self, user: str, outdir: str, label: str, offset: int, length: int
     ) -> bytes:
-        out = Path(outdir)
-        allowed = read_json(_job_dir(out) / FILES_FILE) or {}
-        if label not in allowed:
-            raise PermissionError(f"{label} is not a file of this job")
-        path = Path(allowed[label])
-        if not _inside(path, out):
-            raise PermissionError(f"{path} is outside {out}")
-        try:
-            with open(path, "rb") as f:
-                f.seek(max(0, int(offset)))
-                return f.read(max(0, min(int(length), MAX_READ)))
-        except FileNotFoundError:
-            raise FileNotFoundError(f"{label} does not exist (yet)")
+        return self._io(user).call(
+            "read_file", str(outdir), str(label), int(offset), int(length)
+        )

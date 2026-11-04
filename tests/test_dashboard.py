@@ -6,6 +6,7 @@ import threading
 import pytest
 
 from experiment.api.scheduler.dashboard import COOKIE, Dashboard, summarize
+from experiment.api.scheduler.scheduler import current_user
 
 from test_scheduler import FakeRoot, make_experiment, make_scheduler
 
@@ -23,7 +24,9 @@ def client(tmp_path):
     app = dashboard._app
     app.testing = True
     test_client = app.test_client()
-    test_client.set_cookie(COOKIE, dashboard._token, domain="localhost")
+    test_client.set_cookie(
+        COOKIE, dashboard.token(current_user()), domain="localhost"
+    )
     # NOTE: The dashboard only answers requests addressed to localhost:<port>.
     base = f"http://localhost:{port}"
     for method in ("get", "post"):

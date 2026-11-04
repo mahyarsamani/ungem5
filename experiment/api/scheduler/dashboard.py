@@ -6,8 +6,12 @@ with `?token=...` once and it is kept in a cookie. Requests whose Host
 header isn't local are refused (DNS rebinding), and POSTs must be JSON (a
 cross-site form can't send that without a CORS preflight, which we don't
 answer).
+
+Each user has a token of their own ("<user>.<hmac>", which the console
+shows them), so actions on the dashboard are theirs, with their rights.
 """
 
+import hashlib
 import hmac
 import secrets
 
@@ -17,7 +21,7 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.serving import make_server
 
 from ..host import HostUnreachable, JobError
-from .scheduler import CommandError, Scheduler
+from .scheduler import Caller, CommandError, Scheduler, current_user
 
 COOKIE = "experiment_dashboard"
 CHUNK = 256 * 1024
@@ -37,7 +41,7 @@ class Dashboard:
         self._scheduler = scheduler
         self._port = port
         self._title = title
-        self._token = secrets.token_urlsafe(32)
+        self._secret = secrets.token_bytes(32)
         self._app = Flask(
             __name__,
             template_folder="templates",
@@ -49,8 +53,20 @@ class Dashboard:
             "127.0.0.1", port, self._app, threaded=True
         )
 
-    def url(self) -> str:
-        return f"http://localhost:{self._port}/?token={self._token}"
+    def token(self, user: str) -> str:
+        digest = hmac.new(self._secret, user.encode(), hashlib.sha256)
+        return f"{user}.{digest.hexdigest()[:40]}"
+
+    def url(self, user: str | None = None) -> str:
+        """The dashboard's URL for `user`, by default the scheduler's."""
+        token = self.token(user or current_user())
+        return f"http://localhost:{self._port}/?token={token}"
+
+    def _user_of(self, token: str) -> str | None:
+        user = token.rpartition(".")[0]
+        if user and hmac.compare_digest(token, self.token(user)):
+            return user
+        return None
 
     def serve_forever(self) -> None:
         self._server.serve_forever()
@@ -75,13 +91,17 @@ class Dashboard:
             "last_update_epoch": snapshot.taken_at,
         }
 
+    def _caller(self) -> Caller:
+        """Who sent this request; check_request made sure someone did."""
+        return self._scheduler.caller(
+            self._user_of(request.cookies.get(COOKIE, ""))
+        )
+
     def _call(self, name: str, **kwargs) -> list[str]:
         # NOTE: Bulk actions on hundreds of jobs can take a few seconds.
-        return self._scheduler.call(name, timeout=60, **kwargs)
-
-    def _authorized(self) -> bool:
-        cookie = request.cookies.get(COOKIE, "")
-        return hmac.compare_digest(cookie, self._token)
+        return self._scheduler.call(
+            name, timeout=60, caller=self._caller(), **kwargs
+        )
 
     def _setup_routes(self) -> None:
         app = self._app
@@ -94,15 +114,15 @@ class Dashboard:
             if request.host not in allowed_hosts:
                 abort(403, "unexpected Host header")
             token = request.args.get("token")
-            if token is not None and hmac.compare_digest(token, self._token):
+            if token is not None and self._user_of(token) is not None:
                 response = redirect(request.path)
                 response.set_cookie(
-                    COOKIE, self._token, httponly=True, samesite="Strict"
+                    COOKIE, token, httponly=True, samesite="Strict"
                 )
                 return response
             if request.endpoint in ("static", "health"):
                 return None
-            if not self._authorized():
+            if self._user_of(request.cookies.get(COOKIE, "")) is None:
                 abort(
                     401,
                     "open the dashboard with the URL shown by the console "
@@ -192,6 +212,8 @@ class Dashboard:
             label = request.args.get("label", "")
             if not job_id or not label:
                 abort(400, "missing job or label")
+            if not self._scheduler.may_read(self._caller(), job_id):
+                abort(403, "only the job's owner and admins read its files")
             try:
                 first = self._scheduler.read_job_file(job_id, label, 0, CHUNK)
             except CommandError as e:

@@ -14,9 +14,11 @@ from experiment.api.memory import MemoryHistory
 from experiment.api.resources import Resources, format_size, parse_size
 from experiment.api.scheduler.state import StateStore
 from experiment.api.work import Experiment, Job, JobStatus
-from experiment.api.worker import Worker, resolve_status
+from experiment.api.scheduler.scheduler import current_user
+from experiment.api.userio import resolve_status
+from experiment.api.worker import Worker
 
-from test_scheduler import FakeRoot, make_host, make_scheduler, run
+from test_scheduler import FakeRoot, make_scheduler, run
 
 G = 1 << 30
 
@@ -123,7 +125,7 @@ def test_runner_measures_memory_and_applies_nice(tmp_path):
     )
     j = Sampled("e", tmp_path, command, "hog", outdir, None, "hog")
     Worker().exposed_launch_job(
-        j.id(), str(outdir), j.command(), str(outdir),
+        j.id(), current_user(), str(outdir), j.command(), str(outdir),
         tuple((label, str(p)) for label, p in j.files()),
         tuple((content, str(p)) for _, content, p in j.dumps()),
     )
@@ -138,7 +140,9 @@ def test_runner_measures_memory_and_applies_nice(tmp_path):
     trace = (outdir / ".job" / "memory.jsonl").read_text().splitlines()
     assert len(trace) >= 1 and json.loads(trace[0])["rss"] > 0
     assert (outdir / "nice.txt").read_text().strip() == "7"
-    assert Worker().exposed_memory_trace(str(outdir)).count(b"\n") == len(trace)
+    assert Worker().exposed_memory_trace(current_user(), str(outdir)).count(
+        b"\n"
+    ) == len(trace)
 
 
 class MemoryRoot(FakeRoot):
@@ -153,14 +157,14 @@ class MemoryRoot(FakeRoot):
     def host_resources(self):
         return self.cores, self.total, self.total
 
-    def job_statuses(self, outdirs):
+    def job_statuses(self, jobs):
         self._check()
         return tuple(
             (self.status.get(o, "missing"), 0, None, 1.0, None, self.memory.get(o))
-            for o in outdirs
+            for _, o in jobs
         )
 
-    def memory_trace(self, outdir):
+    def memory_trace(self, user, outdir):
         return b'{"time": 1, "rss": 5}\n'
 
 

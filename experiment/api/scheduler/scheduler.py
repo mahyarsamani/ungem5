@@ -7,10 +7,19 @@ between ticks, and read an immutable `Snapshot` published after every tick.
 
 The scheduler never runs a script's code: the console compiles a script to
 data (`script.compile_script`) and loads that.
+
+Every command comes from a `Caller`. A scheduler run by a user (the default)
+has one caller, that user, who may do anything. A lab scheduler (`lab=True`)
+serves many users: each user's experiments, jobs and scripts are named
+"<user>/<name>" (scripts "<user>:<path>"), everyone sees everything, users
+change only their own, and only admins change hosts, partitions and the
+scheduler itself. Jobs run as the user who loaded them.
 """
 
 import hashlib
 import logging
+import os
+import pwd
 import threading
 import time
 
@@ -37,10 +46,28 @@ from .state import StateStore
 # NOTE: What a job nobody knows anything about may use.
 DEFAULT_MEMORY = 8 << 30
 MEMORY_HISTORY_FILE = "memory.sqlite"
+# NOTE: How far past their partition users may go, as a share of it, taken
+# only from other users' idle partitions.
+BORROW_MARGIN = 0.1
+# NOTE: The partition of users who have none of their own on a host.
+EVERYONE = "*"
+# NOTE: How many new jobs' outdirs one host checks per tick for runs that
+# already ended.
+CHECK_BATCH = 500
+
+
+def current_user() -> str:
+    return pwd.getpwuid(os.getuid()).pw_name
 
 
 class CommandError(Exception):
     """A command was refused; the message is meant for the user."""
+
+
+@dataclass(frozen=True)
+class Caller:
+    user: str
+    admin: bool
 
 
 class HostMode(Enum):
@@ -56,6 +83,7 @@ class HostMode(Enum):
 class Command:
     name: str
     kwargs: dict
+    caller: Caller
     future: Future = field(default_factory=Future)
 
 
@@ -133,13 +161,33 @@ class Scheduler:
         store: StateStore | None = None,
         logger: logging.Logger | None = None,
         default_memory: int | str = DEFAULT_MEMORY,
+        lab: bool = False,
+        admins: Iterable[str] = (),
     ) -> None:
+        """
+        :param lab: serve many users (see the module's docstring); else
+            only the user running the scheduler.
+        :param admins: in a lab, the users who may change hosts,
+            partitions and anyone's jobs.
+        """
         self._name = name
         self._polling_secs = polling_secs
         self._store = store
         self._logger = logger or logging.getLogger(f"{name}.scheduler")
         self._events = EventLog(self._logger)
-        self._info: dict = {"name": name, "started_at": time.time()}
+        self._lab = lab
+        self._admins = frozenset(admins)
+        self._user = current_user()
+        # NOTE: Who runs the command being handled; the scheduler itself
+        # (e.g. resuming) acts as an admin.
+        self._itself = Caller(self._user, True)
+        self._caller = self._itself
+        self._info: dict = {
+            "name": name,
+            "started_at": time.time(),
+            "lab": lab,
+            "admins": sorted(self._admins),
+        }
         self._memory = MemoryHistory(
             store.directory() / MEMORY_HISTORY_FILE if store else None,
             parse_size(default_memory),
@@ -172,6 +220,12 @@ class Scheduler:
         # NOTE: Hosts where every per-host dependency of a job is done;
         # missing means the job has no per-host dependencies.
         self._ready_hosts: dict[str, set[str]] = dict()
+        # NOTE: Per host, per user (or EVERYONE): {"cores", "memory"}, each
+        # None for no limit. A host without partitions is shared freely.
+        self._partitions: dict[str, dict[str, dict]] = dict()
+        # NOTE: Jobs new to this scheduler whose outdirs nobody has checked
+        # for a run that already ended; they don't launch until checked.
+        self._unchecked: set[str] = set()
         self._dirty = True
 
         self._connect_pool = ThreadPoolExecutor(
@@ -194,6 +248,7 @@ class Scheduler:
             "undrain": self._cmd_undrain,
             "remove": self._cmd_remove,
             "capacity": self._cmd_capacity,
+            "partition": self._cmd_partition,
             "memory": self._cmd_memory,
             "signal": self._cmd_signal,
             "reset": self._cmd_reset,
@@ -218,10 +273,27 @@ class Scheduler:
     def commands(self) -> list[str]:
         return list(self._handlers)
 
-    def submit(self, name: str, **kwargs) -> Future:
+    def lab(self) -> bool:
+        return self._lab
+
+    def caller(self, user: str) -> Caller:
+        """`user` as the commands they send see them."""
+        return Caller(user, not self._lab or user in self._admins)
+
+    def may_read(self, caller: Caller, job_id: str) -> bool:
+        """Everyone sees every job; only its owner and admins read its
+        files."""
+        location = self.snapshot().job_locations.get(job_id)
+        return caller.admin or (
+            location is not None and location[2] == caller.user
+        )
+
+    def submit(self, name: str, caller: Caller | None = None, **kwargs) -> Future:
+        """Run command `name` for `caller`, by default the scheduler
+        itself."""
         if name not in self._handlers:
             raise CommandError(f"unknown command {name!r}")
-        command = Command(name, kwargs)
+        command = Command(name, kwargs, caller or self._itself)
         if self._stopped.is_set():
             command.future.set_exception(
                 CommandError("the scheduler is stopping")
@@ -230,8 +302,14 @@ class Scheduler:
             self._commands.put(command)
         return command.future
 
-    def call(self, name: str, timeout: float = 60, **kwargs) -> list[str]:
-        return self.submit(name, **kwargs).result(timeout=timeout)
+    def call(
+        self,
+        name: str,
+        timeout: float = 60,
+        caller: Caller | None = None,
+        **kwargs,
+    ) -> list[str]:
+        return self.submit(name, caller, **kwargs).result(timeout=timeout)
 
     def stop(self) -> None:
         self._stop.set()
@@ -249,11 +327,11 @@ class Scheduler:
         location = snapshot.job_locations.get(job_id)
         if location is None:
             raise CommandError(f"no job {job_id}")
-        outdir, host_name = location
+        outdir, host_name, owner = location
         host = snapshot.host_objects.get(host_name)
         if host is None or not host.up():
             raise HostUnreachable(f"host {host_name} is not connected")
-        return host.read_file(outdir, label, offset, length)
+        return host.read_file(owner, outdir, label, offset, length)
 
     # ---- Scheduler thread ------------------------------------------------
 
@@ -299,6 +377,7 @@ class Scheduler:
     def _run_command(self, command: Command) -> None:
         if not command.future.set_running_or_notify_cancel():
             return
+        self._caller = command.caller
         try:
             result = self._handlers[command.name](**command.kwargs)
         except CommandError as e:
@@ -311,6 +390,8 @@ class Scheduler:
         else:
             self._dirty = True
             command.future.set_result(result)
+        finally:
+            self._caller = self._itself
 
     def _shutdown(self) -> None:
         self._stopped.set()
@@ -345,6 +426,7 @@ class Scheduler:
                 self._poll_host(host)
         self._process_killing()
         self._process_host_removal()
+        self._adopt_finished_runs()
         self._update_readiness()
         self._schedule()
         self._publish()
@@ -373,21 +455,68 @@ class Scheduler:
 
     def _usage(self) -> dict[str, dict]:
         """Per host: cores and memory held by its active jobs, how many
-        jobs, and how much reserved memory they haven't touched yet."""
+        jobs, how much reserved memory they haven't touched yet, and the
+        cores and memory each user holds."""
         usage = {
-            name: {"cores": 0, "memory": 0, "jobs": 0, "untouched": 0}
+            name: {
+                "cores": 0, "memory": 0, "jobs": 0, "untouched": 0,
+                "users": {},
+            }
             for name in self._hosts
         }
         for job in self._jobs.values():
             if job.status().active() and job.host() in usage:
-                used = usage[job.host()]
-                used["cores"] += self._cores(job, job.host())
-                used["memory"] += self._held(job)
-                used["jobs"] += 1
-                used["untouched"] += max(
-                    0, (job.reserved() or 0) - (job.memory_now() or 0)
+                self._hold(
+                    usage[job.host()],
+                    job,
+                    self._cores(job, job.host()),
+                    self._held(job),
+                    max(0, (job.reserved() or 0) - (job.memory_now() or 0)),
                 )
         return usage
+
+    def _hold(
+        self, used: dict, job: Job, cores: int, memory: int, untouched: int
+    ) -> None:
+        used["cores"] += cores
+        used["memory"] += memory
+        used["jobs"] += 1
+        used["untouched"] += untouched
+        mine = used["users"].setdefault(
+            job.owner() or self._user, {"cores": 0, "memory": 0}
+        )
+        mine["cores"] += cores
+        mine["memory"] += memory
+
+    def _within_partition(self, job: Job, host: Host, used: dict) -> bool:
+        """Whether `job` fits in its owner's partition of `host`: up to
+        the partition, or up to BORROW_MARGIN past it while other users
+        leave enough of theirs idle."""
+        shares = self._partitions.get(host.name())
+        if not shares:
+            return True
+        user = job.owner() or self._user
+        share = shares.get(user) or shares.get(EVERYONE)
+        if share is None:
+            return False
+        mine = used["users"].get(user, {"cores": 0, "memory": 0})
+        need = {
+            "cores": self._cores(job, host.name()),
+            "memory": self._estimate(job).memory,
+        }
+        for key, amount in need.items():
+            limit = share[key]
+            if limit is None or mine[key] + amount <= limit:
+                continue
+            idle = sum(
+                max(0, (other[key] or 0) - used["users"].get(name, {}).get(key, 0))
+                for name, other in shares.items()
+                if name not in (user, EVERYONE)
+            )
+            total = mine[key] + amount
+            if total > limit * (1 + BORROW_MARGIN) or total - limit > idle:
+                return False
+        return True
 
     def _estimate(self, job: Job) -> Estimate:
         estimate = self._estimates.get(job.id())
@@ -407,7 +536,9 @@ class Scheduler:
         if limit is not None and used["memory"] + memory > limit:
             return False
         available = host.available_memory()
-        return available is None or memory <= available - used["untouched"]
+        if available is not None and memory > available - used["untouched"]:
+            return False
+        return self._within_partition(job, host, used)
 
     def _too_big(self, job: Job) -> bool:
         """No host could ever take `job`, even empty."""
@@ -615,6 +746,65 @@ class Scheduler:
                     + (f": {message}" if message else ".")
                 )
 
+    def _adopt_finished_runs(self) -> None:
+        """New jobs whose outdir holds a run of theirs that ended (e.g.
+        under another scheduler) take its outcome instead of running again.
+
+        Each job is checked once, through any up host it is compatible
+        with, at most CHECK_BATCH per host and tick. A run of the old
+        per-user scheduler counts too: its job id lacks the "<user>/".
+        """
+        for job_id in list(self._unchecked):
+            job = self._jobs.get(job_id)
+            if job is None or not job.status().pending():
+                self._unchecked.discard(job_id)
+        adopted = 0
+        for host in self._hosts.values():
+            if not self._unchecked:
+                break
+            if not host.up():
+                continue
+            jobs = [
+                self._jobs[job_id]
+                for job_id in sorted(self._unchecked)
+                if self._compatible(self._jobs[job_id], host)
+            ][:CHECK_BATCH]
+            if not jobs:
+                continue
+            try:
+                runs = host.finished_runs(jobs)
+            except HostUnreachable as e:
+                self._host_lost(host, e)
+                continue
+            except JobError as e:
+                self._events.error(f"Checking outdirs on {host.name()}: {e}")
+                continue
+            for job, run in zip(jobs, runs):
+                self._unchecked.discard(job.id())
+                if run is None or run[0] not in (
+                    job.id(),
+                    job.id().split("/", 1)[-1],
+                ):
+                    continue
+                status, returncode, message, start, end, memory = run[1]
+                new = job_status_from_worker(status)
+                if new is None or not new.terminal():
+                    continue
+                job.assign(host.name())
+                job.set_status(new, returncode, message)
+                job.set_times(start, end)
+                if memory is not None:
+                    job.set_memory(*memory)
+                self._record_memory(job, host, new.value)
+                adopted += 1
+        if adopted:
+            self._dirty = True
+            self._events.info(
+                f"{adopted} new job(s) had already run (their outdirs hold "
+                "the record); they keep that outcome, and `reset` runs them "
+                "again."
+            )
+
     def _record_memory(self, job: Job, host: Host, outcome: str) -> None:
         """Add a run that ended to the memory history."""
         if job.memory_peak() is None:
@@ -730,6 +920,7 @@ class Scheduler:
 
     def _forget_job(self, job: Job) -> None:
         self._memory.forget(job.id())
+        self._unchecked.discard(job.id())
         self._launch_context.pop(job.id(), None)
         self._jobs.pop(job.id(), None)
         self._job_origin.pop(job.id(), None)
@@ -759,6 +950,7 @@ class Scheduler:
             for name, experiment in self._experiments.items()
             if name not in self._killing
             for job in experiment.queued()
+            if job.id() not in self._unchecked
         ]
         usage = self._usage()
         progress = True
@@ -801,10 +993,9 @@ class Scheduler:
                 )
                 self._launch(host, job, memory)
                 if job.status().active():
-                    used["cores"] += self._cores(job, host.name())
-                    used["memory"] += memory
-                    used["jobs"] += 1
-                    used["untouched"] += memory
+                    self._hold(
+                        used, job, self._cores(job, host.name()), memory, memory
+                    )
                 if not host.up():
                     break
 
@@ -879,6 +1070,8 @@ class Scheduler:
                 "memory_used": usage[name]["memory"],
                 "memory_available": host.available_memory(),
                 "limits": host.limits(),
+                "partitions": self._partitions.get(name, {}),
+                "users": usage[name]["users"],
                 "jobs": usage[name]["jobs"],
                 "error": host.last_error(),
             }
@@ -919,7 +1112,7 @@ class Scheduler:
             experiments=tuple(experiments),
             jobs=tuple(self._job_view(job) for job in self._jobs.values()),
             job_locations={
-                job_id: (job.outdir(), job.host())
+                job_id: (job.outdir(), job.host(), job.owner())
                 for job_id, job in self._jobs.items()
             },
             host_objects=dict(self._hosts),
@@ -948,6 +1141,7 @@ class Scheduler:
                 for name, host in self._hosts.items()
             },
             "killing": sorted(self._killing),
+            "partitions": self._partitions,
             "deleted_jobs": sorted(self._deleted_jobs),
             "deleted_experiments": sorted(self._deleted_experiments),
             "jobs": {
@@ -1013,6 +1207,11 @@ class Scheduler:
         for name in data.get("killing", []):
             if name in self._experiments:
                 self._killing.add(name)
+        self._partitions = {
+            host: shares
+            for host, shares in data["partitions"].items()
+            if host in self._hosts
+        }
 
         orphans = []
         for job_id, saved in data.get("jobs", {}).items():
@@ -1035,6 +1234,80 @@ class Scheduler:
             f"{len(self._hosts)} host(s) from saved state."
         )
 
+    # ---- Users and names (run on the scheduler thread) ---------------------
+
+    def _named(self, name: str) -> str:
+        """A name the caller gave: in a lab, a name without a "/" is in
+        the caller's namespace; one with a "/" names its own."""
+        if not self._lab or "/" in name:
+            return name
+        return f"{self._caller.user}/{name}"
+
+    def _script_key(self, path: str) -> str:
+        """A script the caller named: in a lab, a path is the caller's own
+        script, and "<user>:<path>" anyone's."""
+        if self._lab and ":" in path and not path.startswith("/"):
+            return path
+        path = str(Path(path).expanduser().resolve())
+        return f"{self._caller.user}:{path}" if self._lab else path
+
+    def _owner_of(self, name: str) -> str:
+        """The user an experiment, job or script key belongs to."""
+        if not self._lab:
+            return self._user
+        return name.split(":" if ":" in name.split("/")[0] else "/", 1)[0]
+
+    def _mine(self, name: str) -> bool:
+        return self._caller.admin or self._owner_of(name) == self._caller.user
+
+    def _require_mine(self, name: str, what: str) -> None:
+        if not self._mine(name):
+            raise CommandError(
+                f"{what} is {self._owner_of(name)}'s; only they or an admin "
+                "may change it"
+            )
+
+    def _require_admin(self, what: str) -> None:
+        if not self._caller.admin:
+            raise CommandError(f"only an admin may {what}")
+
+    def _namespaced(self, compiled: dict, user: str) -> dict:
+        """`compiled`, loaded by `user`: they own it and, in a lab, its
+        names go in their namespace, so they can't reach anyone else's."""
+        if not self._lab:
+            return dict(compiled, owner=user)
+
+        def name(value: str) -> str:
+            return f"{user}/{value}"
+
+        def job(spec: dict) -> dict:
+            return dict(
+                spec,
+                id=name(spec["id"]),
+                experiment=name(spec["experiment"]),
+                after=[name(i) for i in spec["after"]],
+                after_per_host=[name(i) for i in spec["after_per_host"]],
+            )
+
+        return dict(
+            compiled,
+            owner=user,
+            script=f"{user}:{compiled['script']}",
+            experiments=[
+                dict(e, name=name(e["name"]), jobs=[job(j) for j in e["jobs"]])
+                for e in compiled["experiments"]
+            ],
+            templates=[
+                dict(
+                    t,
+                    id=name(t["id"]),
+                    experiment=name(t["experiment"]),
+                    instances=[job(j) for j in t["instances"]],
+                )
+                for t in compiled["templates"]
+            ],
+        )
+
     # ---- Commands (run on the scheduler thread) ---------------------------
 
     def _add_host(self, host: Host) -> None:
@@ -1046,13 +1319,15 @@ class Scheduler:
         self._deps[job.id()] = job.dependency_ids()
 
     def _put_job(
-        self, experiment: Experiment, job: LoadedJob, origin: str
+        self, experiment: Experiment, job: LoadedJob, origin: str, owner: str
     ) -> str:
-        """Add `job` to `experiment`, or give the known job of its id the
-        new definition, keeping its status, unless it is running. Returns
-        "added", "updated", "same", "running", "deleted" or "duplicate"."""
+        """Add `job`, run by `owner`, to `experiment`, or give the known job
+        of its id the new definition, keeping its status, unless it is
+        running. Returns "added", "updated", "same", "running", "deleted"
+        or "duplicate"."""
         if job.id() in self._deleted_jobs:
             return "deleted"
+        job.set_owner(owner)
         old = self._jobs.get(job.id())
         if old is not None:
             if old.experiment() != experiment.name():
@@ -1070,7 +1345,10 @@ class Scheduler:
         self._jobs[job.id()] = job
         self._record_dependencies(job)
         self._dirty = True
-        return "added" if old is None else "updated"
+        if old is None:
+            self._unchecked.add(job.id())
+            return "added"
+        return "updated"
 
     def _check_dependencies(self, jobs: list[Job]) -> None:
         """Refuse a script whose jobs depend on unknown jobs, or on each
@@ -1108,8 +1386,18 @@ class Scheduler:
     def _load(self, compiled: dict, merge: bool) -> list[str]:
         """Add what a compiled script defines (see `script.compile_script`).
         With `merge` (reload), jobs already known take their new
-        definition unless they are running."""
-        origin = compiled["script"]
+        definition unless they are running. `compiled` is namespaced."""
+        origin, owner = compiled["script"], compiled["owner"]
+        new_hosts = [
+            spec["name"]
+            for spec in compiled["hosts"]
+            if spec["name"] not in self._hosts
+        ]
+        if new_hosts and not self._caller.admin:
+            raise CommandError(
+                f"only an admin may add hosts ({', '.join(new_hosts)}); load "
+                "a script without them, or ask an admin to add them"
+            )
         experiments = [
             (spec, [LoadedJob(job) for job in spec["jobs"]])
             for spec in compiled["experiments"]
@@ -1163,7 +1451,7 @@ class Scheduler:
                 lines.append(f"added experiment {name}")
             counts: dict[str, int] = {}
             for job in jobs:
-                outcome = self._put_job(existing, job, origin)
+                outcome = self._put_job(existing, job, origin, owner)
                 counts[outcome] = counts.get(outcome, 0) + 1
                 if outcome == "duplicate":
                     lines.append(
@@ -1211,7 +1499,7 @@ class Scheduler:
                 experiment = Experiment(spec["experiment"], Path(spec["outdir"]))
                 self._experiments[spec["experiment"]] = experiment
             added = sum(
-                self._put_job(experiment, job, origin) == "added"
+                self._put_job(experiment, job, origin, owner) == "added"
                 for job in jobs
             )
             if new:
@@ -1227,6 +1515,8 @@ class Scheduler:
         return lines
 
     def _cmd_load(self, compiled: dict) -> list[str]:
+        """Load what the console compiled, as the caller's."""
+        compiled = self._namespaced(compiled, self._caller.user)
         if compiled["script"] in self._scripts:
             raise CommandError(
                 f"{compiled['script']} is already loaded; use `reload` to "
@@ -1235,9 +1525,12 @@ class Scheduler:
         return self._load(compiled, merge=False)
 
     def _cmd_reload(self, compiled: dict) -> list[str]:
-        return self._load(compiled, merge=True)
+        return self._load(
+            self._namespaced(compiled, self._caller.user), merge=True
+        )
 
     def _experiment(self, name: str) -> Experiment:
+        name = self._named(name)
         if name not in self._experiments:
             raise CommandError(f"no experiment named {name!r}")
         return self._experiments[name]
@@ -1248,6 +1541,7 @@ class Scheduler:
         return self._hosts[name]
 
     def _resolve_job(self, prefix: str) -> Job:
+        prefix = self._named(prefix)
         matches = [
             job for job_id, job in self._jobs.items()
             if job_id.startswith(prefix)
@@ -1261,21 +1555,25 @@ class Scheduler:
         return matches[0]
 
     def _cmd_kill(self, experiment: str) -> list[str]:
-        self._experiment(experiment)
-        self._killing.add(experiment)
-        return [f"killing experiment {experiment}"]
+        name = self._experiment(experiment).name()
+        self._require_mine(name, f"experiment {name}")
+        self._killing.add(name)
+        return [f"killing experiment {name}"]
 
     def _cmd_drain(self, host: str) -> list[str]:
+        self._require_admin("drain hosts")
         self._host(host)
         self._host_mode[host] = HostMode.DRAINING
         return [f"host {host} won't get new jobs"]
 
     def _cmd_undrain(self, host: str) -> list[str]:
+        self._require_admin("undrain hosts")
         self._host(host)
         self._host_mode[host] = HostMode.ACTIVE
         return [f"host {host} is accepting jobs again"]
 
     def _cmd_remove(self, host: str, force: bool = False) -> list[str]:
+        self._require_admin("remove hosts")
         self._host(host)
         active = self._active_jobs(host)
         if force:
@@ -1300,6 +1598,7 @@ class Scheduler:
     ) -> list[str]:
         """Limit what jobs may use on `host`: cores as N, +N or -N, memory
         as a size like 200G; "auto" for what the worker reports."""
+        self._require_admin("change host limits")
         target = self._host(host)
         if cores is None and memory is None:
             raise CommandError("give --cores, --memory or both")
@@ -1317,6 +1616,51 @@ class Scheduler:
                 if memory_limit is not None
                 else "memory unknown until its worker reports it"
             )
+        ]
+
+    def _cmd_partition(
+        self,
+        host: str,
+        user: str,
+        cores: str | None = None,
+        memory: str | None = None,
+        clear: bool = False,
+    ) -> list[str]:
+        """Give `user` (or EVERYONE, for users without their own) a share
+        of `host`: cores as N, memory as a size, "none" for no limit.
+        Once a host has partitions, users without one (and with no
+        EVERYONE partition) can't run there."""
+        self._require_admin("change partitions")
+        self._host(host)
+        shares = self._partitions.setdefault(host, {})
+        if clear:
+            shares.pop(user, None)
+            if not shares:
+                del self._partitions[host]
+            return [f"{host}: {user} has no partition"]
+        if cores is None and memory is None:
+            raise CommandError("give --cores, --memory, both, or --clear")
+        share = dict(shares.get(user, {"cores": None, "memory": None}))
+        try:
+            if cores is not None:
+                share["cores"] = None if cores == "none" else int(cores)
+                if share["cores"] is not None and share["cores"] < 0:
+                    raise ValueError(f"cores can't be negative: {cores}")
+            if memory is not None:
+                share["memory"] = None if memory == "none" else parse_size(memory)
+        except (TypeError, ValueError) as e:
+            raise CommandError(f"bad partition: {e}")
+        shares[user] = share
+        return [
+            f"{host}: {user} gets "
+            + ("any number of" if share["cores"] is None else str(share["cores"]))
+            + " core(s) and "
+            + (
+                "any memory"
+                if share["memory"] is None
+                else format_size(share["memory"])
+            )
+            + f", and may borrow {BORROW_MARGIN:.0%} more from idle partitions"
         ]
 
     def _cmd_memory(self, job: str) -> list[str]:
@@ -1368,6 +1712,9 @@ class Scheduler:
         lines = []
         for prefix in jobs:
             job = self._resolve_job(prefix)
+            if not self._mine(job.id()):
+                lines.append(f"{job.id()[:8]}: not yours")
+                continue
             host = self._hosts.get(job.host() or "")
             if not job.status().active() or host is None:
                 lines.append(f"{job.id()[:8]}: not running")
@@ -1409,6 +1756,8 @@ class Scheduler:
             ]
         if not targets:
             raise CommandError("no jobs to reset")
+        for job in targets:
+            self._require_mine(job.id(), f"job {job.id()[:12]}")
         lines, count = [], 0
         for job in targets:
             if job.status() == JobStatus.UNKNOWN and force:
@@ -1428,6 +1777,7 @@ class Scheduler:
         return lines
 
     def _cmd_stop(self, kill_jobs: bool = False) -> list[str]:
+        self._require_admin("stop the scheduler")
         lines = []
         if kill_jobs:
             killed = 0
@@ -1470,9 +1820,10 @@ class Scheduler:
         """Forget jobs, an experiment, or a script's jobs. Output files on
         disk are never touched."""
         if script is not None:
-            path = str(Path(script).expanduser().resolve())
+            path = self._script_key(script)
             if path not in self._scripts:
                 raise CommandError(f"{script} is not a loaded script")
+            self._require_mine(path, f"script {path}")
             owned = [
                 job
                 for job_id, job in self._jobs.items()
@@ -1507,14 +1858,16 @@ class Scheduler:
 
         if experiment is not None:
             target = self._experiment(experiment)
-            self._refuse_if_active(target.jobs(), f"experiment {experiment}")
+            name = target.name()
+            self._require_mine(name, f"experiment {name}")
+            self._refuse_if_active(target.jobs(), f"experiment {name}")
             self._refuse_if_needed(
-                {job.id() for job in target.jobs()}, f"experiment {experiment}"
+                {job.id() for job in target.jobs()}, f"experiment {name}"
             )
             count = len(target.jobs())
-            self._remove_experiment(experiment)
-            self._deleted_experiments.add(experiment)
-            return [f"deleted experiment {experiment} and its {count} job(s)"]
+            self._remove_experiment(name)
+            self._deleted_experiments.add(name)
+            return [f"deleted experiment {name} and its {count} job(s)"]
 
         if not jobs:
             raise CommandError("nothing to delete")
@@ -1523,6 +1876,9 @@ class Scheduler:
         # NOTE: Jobs deleted together may depend on each other.
         selected = {job.id() for job in targets}
         for job in targets:
+            if not self._mine(job.id()):
+                lines.append(f"{job.id()[:8]}: skipped, not yours")
+                continue
             if job.status().active():
                 lines.append(f"{job.id()[:8]}: skipped, it is {job.status()}")
                 continue
@@ -1555,16 +1911,20 @@ class Scheduler:
         loaded script again, as compiled, so they come back."""
         restored = 0
         if experiment is not None:
-            if experiment not in self._deleted_experiments:
-                raise CommandError(f"experiment {experiment} isn't deleted")
-            self._deleted_experiments.discard(experiment)
+            name = self._named(experiment)
+            if name not in self._deleted_experiments:
+                raise CommandError(f"experiment {name} isn't deleted")
+            self._require_mine(name, f"experiment {name}")
+            self._deleted_experiments.discard(name)
             restored += 1
         for prefix in jobs:
+            prefix = self._named(prefix)
             matches = [i for i in self._deleted_jobs if i.startswith(prefix)]
             if len(matches) != 1:
                 raise CommandError(
                     f"{prefix!r} matches {len(matches)} deleted jobs"
                 )
+            self._require_mine(matches[0], f"job {matches[0][:12]}")
             self._deleted_jobs.discard(matches[0])
             restored += 1
         if not restored:
