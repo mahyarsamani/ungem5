@@ -9,7 +9,8 @@
 # 3. subclass a stat class to add methods that only make sense for your stat;
 # 4. use a converter that looks things up in the run's config.
 #
-# `sift_specs.py` and `useful_bytes.py` hold the finished versions.
+# `tutorial_specs.py` and `useful_bytes.py` hold the finished versions.
+# They are frozen examples: a project keeps its real specs in its own tree (SIFT's live in the SIFT project, `analysis/sift_stats/`), never in graphix.
 
 # %%
 import inspect
@@ -83,12 +84,12 @@ print(inspect.getsource(useful_bytes.UsefulBytes))
 
 # %% [markdown]
 # Passing the class as the spec's `kind` makes graphix build it.
-# `SIFT_SPECS` does that for all four useful-byte stats (`usefulBytes`, `readUsefulBytes`, `writeUsefulBytes`, `residentUsefulBytes`).
+# `TUTORIAL_SPECS` does that for all four useful-byte stats (`usefulBytes`, `readUsefulBytes`, `writeUsefulBytes`, `residentUsefulBytes`).
 
 # %%
-from sift_specs import SIFT_SPECS
+from tutorial_specs import TUTORIAL_SPECS
 
-runs = gx.RunSet.from_dirs(DATA, labels=sift_labels, owners=OWNERS, specs=SIFT_SPECS)
+runs = gx.RunSet.from_dirs(DATA, labels=sift_labels, owners=OWNERS, specs=TUTORIAL_SPECS)
 useful = runs["usefulBytes"]
 type(useful).__name__, useful.plot_kinds
 
@@ -111,7 +112,7 @@ by_accessor.cbu().to_frame().pivot_table(index="accessor", columns="input", valu
 # A converter with two parameters receives the `Run` as well, so it can turn the version into that controller's owner name.
 
 # %%
-print(inspect.getsource(sys.modules["sift_specs"].controller_owner))
+print(inspect.getsource(sys.modules["tutorial_specs"].controller_owner))
 transfers = runs["bytesTransferred"]
 print(transfers.describe())
 
@@ -122,7 +123,7 @@ frame.groupby(["label", "dst"])["value"].sum().sort_values(ascending=False).head
 
 # %% [markdown]
 # The runs in `example_data/` predate the current name, `bytesTransferred.<type>.<accessor>.<dst>`.
-# `SIFT_SPECS` holds a spec for each form, and both build the same family.
+# `TUTORIAL_SPECS` holds a spec for each form, and both build the same family.
 #
 # ## Several dims from one token
 #

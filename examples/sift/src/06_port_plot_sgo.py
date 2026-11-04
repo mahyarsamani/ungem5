@@ -9,7 +9,7 @@
 # | `Node`, `parse_config_json`, `parse_stats_txt(index, root, path, -1)` | `RunSet.from_dirs(paths, labels=...)` |
 # | parsing `constructor.py` lines by position | a label function (`sift_labels`) |
 # | `search_children(root, {"dcache": r"...dcache.cache$"})` | `select(owner="tile*.l1d.cache")` with an `OwnerScheme` |
-# | `stat["usefulBytes_<array>"]` | `runs["usefulBytes"].select(accessor=...)` with `SIFT_SPECS` |
+# | `stat["usefulBytes_<array>"]` | `runs["usefulBytes"].select(accessor=...)` with `TUTORIAL_SPECS` |
 # | `filter_parents(these_parents=...)` then `aggregate_using(CombineAggregator())` | `select(...)` then `merge()` |
 # | `get_buckets_for_parent` and `get_freqs_for_parent` | `to_frame()` with `lo`, `hi`, `count`, `pdf`, `cdf` |
 #
@@ -27,13 +27,13 @@ import matplotlib.pyplot as plt
 sys.path.insert(0, str(Path.cwd().resolve().parents[1]))
 import graphix as gx
 from sift_labels import sift_labels
-from sift_specs import SIFT_SPECS
+from tutorial_specs import TUTORIAL_SPECS
 
 runs = gx.RunSet.from_dirs(
     "../../example_data/*/*",
     labels=sift_labels,
     owners=gx.OwnerScheme.from_json("owners.json"),
-    specs=SIFT_SPECS,
+    specs=TUTORIAL_SPECS,
 )
 useful = runs["usefulBytes"].select(owner="tile*.l1d.cache")
 

@@ -60,7 +60,8 @@ Plotting is left to the user: every class exports a tidy DataFrame and lists the
 - **A dim that needs the run's config**: give the spec a converter with two parameters, `(value, run)`.
 - **Different SimObject names for the same hardware**: an `OwnerScheme`.
 
-`examples/sift/sift_specs.py` and `examples/sift/useful_bytes.py` are worked examples.
+A project's specs, stat classes and owner schemes live in the project, never in graphix: graphix knows stock gem5 only, and a new project stat changes only the project.
+`examples/sift/tutorial_specs.py` and `examples/sift/useful_bytes.py` are the tutorial's frozen worked examples; SIFT's real ones are a package in the SIFT project (`analysis/sift_stats/`).
 
 ## Gem5 quirks graphix handles
 

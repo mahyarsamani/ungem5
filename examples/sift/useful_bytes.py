@@ -5,6 +5,9 @@ core used (`usefulBytes.<accessor>` in `CacheMemory`, one bucket per byte
 count from 0 to the block size).
 `UsefulBytes` is a `Histogram` with two methods that only make sense for
 that stat; graphix itself knows nothing about it.
+
+This copy is the tutorial's frozen example; SIFT's own lives in the SIFT
+project, `analysis/sift_stats/useful_bytes.py`.
 """
 
 import math
