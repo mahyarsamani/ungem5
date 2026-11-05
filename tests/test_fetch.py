@@ -145,7 +145,7 @@ def _sha(path: Path) -> str:
 
 DEFAULT_FILES = {
     "config.json", "stats.txt", "params.json", "simulation_finished",
-    ".job/exit.json", ".job/launch.json",
+    "window.json", ".job/exit.json", ".job/launch.json",
 }
 
 
@@ -169,8 +169,8 @@ def test_fetch_copies_what_results_and_stats_read(served, tmp_path):
                 (source / name).stat().st_mtime_ns, abs=1000
             ), name
     assert len(lines) == JOBS + 1
-    assert lines[0].startswith("e-0: fetched 6 of 6 file(s), ")
-    assert lines[-1].startswith("total: fetched 12 of 12 file(s), ")
+    assert lines[0].startswith("e-0: fetched 7 of 7 file(s), ")
+    assert lines[-1].startswith("total: fetched 14 of 14 file(s), ")
 
     # NOTE: The stats layer reads the copy as it reads the outdir.
     with warnings.catch_warnings():
@@ -194,7 +194,7 @@ def test_a_second_fetch_moves_nothing_and_a_change_moves_again(
     results = fetch(again, ["e"], into, say=lines.append)
     assert again.moved == 0
     assert [r.fetched for r in results] == [0, 0]
-    assert lines[-1].startswith("total: fetched 0 of 12 file(s), 0B")
+    assert lines[-1].startswith("total: fetched 0 of 14 file(s), 0B")
     assert local.stat().st_mtime_ns == cached_mtime
 
     # NOTE: The job ran again and changed one file: only it moves.
@@ -224,13 +224,13 @@ def test_match_adds_files_and_leaves_the_rest(served, tmp_path):
     into = tmp_path / "fetched"
     fetch(
         SchedulerSource(client), ["e-0"], into,
-        DEFAULT_GLOBS + ("window.json",), say=lambda line: None,
+        DEFAULT_GLOBS + ("stdout",), say=lambda line: None,
     )
     local = into / "e" / "0"
     got = {str(p.relative_to(local)) for p in local.rglob("*") if p.is_file()}
-    # NOTE: The 3 MB log, stdout, stderr and the runner's other records
-    # stay on the host.
-    assert got == DEFAULT_FILES | {"window.json"}
+    # NOTE: The 3 MB log, stderr and the runner's other records stay on
+    # the host.
+    assert got == DEFAULT_FILES | {"stdout"}
     assert not (into / "e" / "1").exists()
 
     # NOTE: Globs alone, without the defaults; as in the console's `files
@@ -263,14 +263,14 @@ def test_helper_fetch_reaches_its_users_scheduler(served, tmp_path, capsys):
     def helper_fetch(*args):
         return _process_fetch_args(*parse_fetch_args(list(args)))
 
-    assert helper_fetch("e", "--into", str(into), "--match", "window.json") == 0
+    assert helper_fetch("e", "--into", str(into), "--match", "stdout") == 0
     out = capsys.readouterr().out.splitlines()
-    assert out[0].startswith("e-0: fetched 7 of 7 file(s), ")
-    assert out[-1].startswith("total: fetched 14 of 14 file(s), ")
-    assert (into / "e" / "1" / "window.json").is_file()
+    assert out[0].startswith("e-0: fetched 8 of 8 file(s), ")
+    assert out[-1].startswith("total: fetched 16 of 16 file(s), ")
+    assert (into / "e" / "1" / "stdout").is_file()
     assert helper_fetch("e", "--into", str(into)) == 0
     assert capsys.readouterr().out.splitlines()[-1].startswith(
-        "total: fetched 0 of 12 file(s), 0B"
+        "total: fetched 0 of 14 file(s), 0B"
     )
     assert helper_fetch("nope", "--into", str(into)) == 1
     assert "no experiment named 'nope'" in capsys.readouterr().err

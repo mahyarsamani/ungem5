@@ -77,7 +77,7 @@ This file is the union of the two tools' memories, so that nothing pending on ei
 - [merge] Editable or pinned install per venv once one package serves daemons and analysis; today graphix is editable and experiment pinned.
 - [merge] Should `results/jobs.py` read the experiment name from `constructor.py` or `.job/run.json`, or should `gem5Experiment` write an `experiment.json` marker?
 - [merge] Is `fetch` through the scheduler (every byte crosses worker to scheduler, then scheduler to console; about 3.4 GB for 125 runs of 27 MB) enough, with `rsync` printed as the alternative, or should the worker serve files directly?
-- [merge] `fetch`'s defaults leave out SIFT's `window.json` (no ungem5 code reads it), so SIFT's `done` needs `--match window.json`; and `--match` adds to the defaults, with no flag to fetch only the matches.
+- [merge] `fetch`'s `--match` adds to the defaults (which include `window.json` for SIFT's `done`), with no flag to fetch only the matches; and the local copy is hashed in full on every fetch, about 3.4 GB for the 125 v5 runs.
 - [merge] Is graphix ever meant for people outside the lab; if yes, a separate `stats` distribution is the right call.
 - [merge] The word: "the helper source" in the chats against `results/jobs.py` in the plan.
 - [merge] Phase 4 needs a window with nothing running and a plan for jobs mid-flight; closing PRs #1 to #3 and renaming or archiving the GitHub repos is outward-facing and mine.
