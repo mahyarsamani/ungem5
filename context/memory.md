@@ -10,7 +10,7 @@ This file is the union of the two tools' memories, so that nothing pending on ei
 
 ## Current state
 - [merge] Branch `ungem5` (local, from `multiuser` at 599f6a1) holds this work: graphix subtree-imported from `redesign` (848d959) and moved into `ungem5/stats/` and `ungem5/results/`, experiment moved into `ungem5/{cli,jobs,schedule,run,common}/`, the on-disk names renamed (`/etc/ungem5`, `~/.local/state/ungem5`, `/tmp/ungem5-<uid>`, `~/.cache/ungem5/{store,stats}`, `ungem5-<owner>.slice`, `UNGEM5_*`), one pytest suite (287 passed, 6 skipped without `example_data/`), version 0.26.11.1.
-- [merge] Done on `ungem5`: `results/jobs.py` imports the runner's names directly (no `_runner()`, no `HAVE_EXPERIMENT`); the marker names live in `ungem5/jobs/markers.py`, spelled out in the copied `decorators.py` and checked by a test; `ungem5.results` and `import ungem5.stats` need neither pandas nor the scheduler; graphix's README is folded into `README.md`; `examples/sift/` moved; the old-API notebook and `under_the_rug/` are parked in `docs/parked/graphix-plotting/`.
+- [merge] Done on `ungem5`: `results/jobs.py` imports the runner's names directly (no `_runner()`, no `HAVE_EXPERIMENT`); the marker names live in `ungem5/jobs/markers.py`, spelled out in the copied `decorators.py` and checked by a test; `ungem5.results` and `import ungem5.stats` need neither pandas nor the scheduler; graphix's README is folded into `README.md`; `examples/sift/` moved; the old-API notebook and the plotting code (`barplot.py`, `markers.py`, `util.py`) are parked in the PhD repo under `under_the_rug/graphix/`.
 - [merge] Not moved yet: SIFT, the sandbox, the thesis script, the PhD repo's rules and submodules, and both venvs still use `experiment` and `graphix`.
 - [experiment] Version 0.26.10.2; `main` (93f5c81, `gem5Build` demand separate from build threads) is one commit ahead of `origin/main`, and the PhD repo records a different commit than the checkout.
 - [experiment] Branch `multiuser` (checked out, local only) has eight commits over `main`: resources and memory placement, scripts compiled in the console, the lab scheduler and root workers, memory enforcement, the learned model, `/etc/experiment/config.toml`, bundles with the per-host store and the outdir index, and a bundle fix; 141 tests pass.
@@ -98,7 +98,7 @@ Each item carries its side and the date it was last mentioned.
 - run: nothing recorded on either side.
 - stats:
   - The tutorial should say that runs before 2026-10-09 label every access `other` [graphix, 2026-10-09].
-  - Drop or keep the parked `under_the_rug/{barplot,markers,util}.py` at the move (inferred) [graphix, 2026-11-03].
+  - Drop or keep the parked plotting code, now in the PhD repo under `under_the_rug/graphix/` (moved 2026-11-04) [graphix, 2026-11-03].
   - SIFT's `sift_sets.latency_quantile` could switch to graphix's tail-aware quantiles (NaN against `inf` in the overflow) [graphix, 2026-11-04].
 - results:
   - `results/fetch.py` [merge, 2026-11-04].
@@ -134,7 +134,7 @@ Each item carries its side and the date it was last mentioned.
 - Scheduling: `ungem5/schedule/{scheduler,daemon,console,dashboard,filters,state}.py` with `templates/` and `static/`, and `{host,worker,runner,userio,memory,model}.py`; TLS `ungem5/common/pki.py`; `deploy/`.
 - Backends: `ungem5/run/{build,simulate}.py`.
 - Stats: the core `ungem5/stats/*.py`, `ungem5/stats/stats/`, `ungem5/stats/gem5/`; the job source `ungem5/results/jobs.py`; `fetch.py` is still to come in `results/` and `cli/`.
-- Tests: `tests/` (pytest; `gxtest.py` gives the stats tests a temporary cache; `test_imports.py` checks every module and the old names); `examples/sift/` and the gitignored `example_data/`; parked plotting in `docs/parked/graphix-plotting/`.
+- Tests: `tests/` (pytest; `gxtest.py` gives the stats tests a temporary cache; `test_imports.py` checks every module and the old names); `examples/sift/` and the gitignored `example_data/`; the parked plotting code is in the PhD repo under `under_the_rug/graphix/`.
 - Pre-merge trees: `tools/graphix` (untouched) and the `multiuser` branch here; old-to-new paths are in the commit messages on `ungem5`.
 - Callers: SIFT's `projects/sift/{job_defs,hosts}.py`, `analysis/sift_sets.py` and `analysis/sift_stats/`; the sandbox `experiment-test/{run_many,run_example}.py` outside the repo; the thesis `workbench/plots/sift_topdown.py`.
 

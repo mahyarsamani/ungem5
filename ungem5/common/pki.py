@@ -96,7 +96,7 @@ def init_ca(directory: Path | None = None, days: int = 3650) -> Path:
 
     key = _new_key()
     name = x509.Name(
-        [x509.NameAttribute(NameOID.COMMON_NAME, "experiment CA")]
+        [x509.NameAttribute(NameOID.COMMON_NAME, "ungem5 CA")]
     )
     now = datetime.datetime.now(datetime.timezone.utc)
     cert = (
