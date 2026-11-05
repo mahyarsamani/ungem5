@@ -11,6 +11,7 @@ COMMANDS = {
     "schedule": "Start (or attach to) the scheduler and open its console.",
     "console": "Attach a console to the running scheduler.",
     "certs": "Manage certificates for scheduler <-> worker connections.",
+    "fetch": "Pull finished jobs' result files through the scheduler.",
 }
 
 
@@ -48,6 +49,10 @@ def _dispatch(command: str, args: list[str]) -> int | None:
         from .certs import parse_certs_args, _process_certs_args
 
         return _process_certs_args(*parse_certs_args(args))
+    if command == "fetch":
+        from .fetch import parse_fetch_args, _process_fetch_args
+
+        return _process_fetch_args(*parse_fetch_args(args))
     return None
 
 
