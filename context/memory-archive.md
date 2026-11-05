@@ -93,3 +93,41 @@ These are the parts of the replaced file, as last edited on 2026-11-03, that the
 ### Pointers (2026-11-03)
 - CLI `experiment/cli/{helper,initialize,build,run,work,schedule,certs}.py`; scheduler `experiment/api/scheduler/{scheduler,daemon,console,dashboard,state}.py`; worker `experiment/api/{worker,runner,host,work}.py`; TLS `experiment/common/pki.py`.
 - Resources, memory history and model `experiment/api/{resources,memory,model}.py`; script compilation `experiment/api/script.py`; file work as the owner `experiment/api/userio.py`; backends `experiment/api/{build,simulate}.py`; job classes `experiment/common/gem5_work.py`; project config `experiment/common/config_util.py`.
+
+## 2026-11-04: superseded by the merge landing on `main`
+Moved from `memory.md` when `tools/experiment` became `tools/ungem5`; the facts below were true during the merge and are kept for the record.
+
+### Current state (superseded)
+- [merge] Branch `ungem5` (local, from `multiuser` at 599f6a1) held the work: graphix subtree-imported from `redesign` (848d959) and moved into `ungem5/stats/` and `ungem5/results/`, experiment moved into `ungem5/{cli,jobs,schedule,run,common}/`, the on-disk names renamed (`/etc/ungem5`, `~/.local/state/ungem5`, `/tmp/ungem5-<uid>`, `~/.cache/ungem5/{store,stats}`, `ungem5-<owner>.slice`, `UNGEM5_*`), one pytest suite (287 passed, 6 skipped without `example_data/`), version 0.26.11.1; `main` was fast-forwarded to it on 2026-11-04.
+- [merge] Done on `ungem5`: `results/jobs.py` imports the runner's names directly (no `_runner()`, no `HAVE_EXPERIMENT`); the marker names live in `ungem5/jobs/markers.py`, spelled out in the copied `decorators.py` and checked by a test; `ungem5.results` and `import ungem5.stats` need neither pandas nor the scheduler; graphix's README is folded into `README.md`; `examples/sift/` moved.
+- [experiment] Version 0.26.10.2; `main` (93f5c81, `gem5Build` demand separate from build threads) was one commit ahead of `origin/main`.
+- [experiment] Branch `multiuser` had eight commits over `main`: resources and memory placement, scripts compiled in the console, the lab scheduler and root workers, memory enforcement, the learned model, `/etc/experiment/config.toml`, bundles with the per-host store and the outdir index, and a bundle fix; 141 tests passed.
+- [experiment] experiment's own `context/memory.md` (as last edited 2026-11-03) was replaced by the union memory; its unique parts are above under 2026-11-04.
+- [graphix] Version 0.2.0, Python 3.10 or newer, pandas the only dependency, no CLI; 3780 lines in `graphix/{parse,config,names,specs,records,run,cache,frame,owners}.py`, `stats/`, `gem5/` and `sources/helper.py`; 87 unittest tests.
+- [graphix] Branch `redesign` (checked out in `tools/graphix`, no upstream) holds the whole redesign and the five commits of 2026-11-03/04 (66f2fcf to 848d959); `main` (8644275, "Snapshot before redesign") predates it.
+- [graphix] Installed editable in `.venv/x86_64` only; `.venv/aarch64` had neither graphix nor pandas.
+- [graphix] The `helper` source imported experiment's file names from `experiment.api.runner` so the merge would be easiest (decision 2026-11-03).
+
+### Open questions answered by the merge
+- The on-disk identifiers followed the rename (`/etc/ungem5`, `~/.local/state/ungem5`, `/tmp/ungem5-<uid>`, `ungem5-<owner>.slice`, `~/.cache/ungem5`, `UNGEM5_*`), done in phase 2.
+- Repository strategy: the `experiment` repo was kept and graphix subtree-imported (so `git blame` survives under a prefix); the GitHub rename to `ungem5` is Mahyar's.
+- Editable or pinned per venv: pinned for the venvs that run daemons; editable only in scratch venvs.
+- "The helper source" of the chats is `results/jobs.py`.
+- Phase 4's quiet window: the git side was done without one (the live daemons run a pinned install, untouched by the rename); the venv reinstall and restart still need one.
+
+### Not done items closed on 2026-11-04
+- SIFT's switchover in `job_defs.py` (`demand` to `Resources`, `SingleSlotBuild` deleted since `gem5Build` already counts resources, not threads); the checkpoint and restore scripts were already load scripts and compile.
+- `helper fetch` on the index (phase 5).
+- Review and merge `multiuser` (folded into the fast-forward); refresh experiment's memory for the config-file and bundle commits (this file).
+- The living rules that name the packages: `CLAUDE.md`, `gem5-viz.md`, the `visualization-rules` skill, `wave1-common.md`, `context/overview.md`; the `gem5-build`, `gem5-run` and `memory-update` skills never named them.
+- The thesis script `sift_topdown.py` imports the installed package (phase 3).
+- The parent symlink `../experiment` turned out not to exist, so there was nothing to repoint.
+
+### Next steps (historical, the merge plan's phases)
+1. Phase 0: land what is in flight (merged into the fast-forward instead; the pushes remain).
+2. Phase 1: the name `ungem5`, layout option A, the union memory (2026-11-04).
+3. Phase 2: the package on branch `ungem5` (2026-11-04).
+4. Phase 3: move the callers and the living rules; the CSVs stayed identical (2026-11-04).
+5. Phase 4: `.gitmodules` and the submodule rename done; the venv reinstall and daemon restart remain.
+6. Phase 5: `helper fetch` (2026-11-04); the check on a real experiment remains.
+7. Phase 6: the decision is logged and the memories refreshed; archiving graphix and the pushes remain.
