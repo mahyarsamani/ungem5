@@ -51,6 +51,9 @@ DEFAULT_GLOBS = (
     # launch record when there is no exit record.
     f"{JOB_DIR}/{EXIT_FILE}",
     f"{JOB_DIR}/{LAUNCH_FILE}",
+    # NOTE: A run script's record of how its window ended; SIFT's `done`
+    # (analysis/sift_sets.py) reads it, and the merge plan listed it.
+    "window.json",
 )
 
 # NOTE: The most a worker reads of a file per call.
