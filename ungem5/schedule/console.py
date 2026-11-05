@@ -131,6 +131,17 @@ class ControlClient:
     def last_event(self) -> int:
         return int(self._call("last_event"))
 
+    def job_index(self, job_id: str) -> dict | None:
+        """The index of a finished job's outdir (see `runner.write_index`),
+        or None before it ends; through the scheduler, from its host."""
+        return json.loads(self._call("job_index", job_id))
+
+    def read_file(
+        self, job_id: str, path: str, offset: int, length: int
+    ) -> bytes:
+        """Bytes of a file in a job's index, through the scheduler."""
+        return bytes(self._call("read_file", job_id, path, offset, length))
+
 
 # ---- Parsing and completion -----------------------------------------------
 

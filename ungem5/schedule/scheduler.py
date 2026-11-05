@@ -274,6 +274,7 @@ class Scheduler:
             "partition": self._cmd_partition,
             "memory": self._cmd_memory,
             "files": self._cmd_files,
+            "resolve": self._cmd_resolve,
             "signal": self._cmd_signal,
             "resume": self._cmd_resume,
             "retry": self._cmd_retry,
@@ -346,9 +347,9 @@ class Scheduler:
     def wait_stopped(self, timeout: float | None = None) -> bool:
         return self._stopped.wait(timeout)
 
-    def read_job_file(
-        self, job_id: str, label: str, offset: int, length: int
-    ) -> bytes:
+    def _located(self, job_id: str) -> tuple[Host, Path, str]:
+        """(host, outdir, owner) of a job, from the latest snapshot, for
+        the threads that read its files."""
         snapshot = self.snapshot()
         location = snapshot.job_locations.get(job_id)
         if location is None:
@@ -357,7 +358,19 @@ class Scheduler:
         host = snapshot.host_objects.get(host_name)
         if host is None or not host.up():
             raise HostUnreachable(f"host {host_name} is not connected")
+        return host, outdir, owner
+
+    def read_job_file(
+        self, job_id: str, label: str, offset: int, length: int
+    ) -> bytes:
+        host, outdir, owner = self._located(job_id)
         return host.read_file(owner, outdir, label, offset, length)
+
+    def read_job_index(self, job_id: str) -> dict | None:
+        """The index of the job's outdir, from its host, or None before
+        the job ends."""
+        host, outdir, owner = self._located(job_id)
+        return host.job_index(owner, outdir)
 
     # ---- Scheduler thread ------------------------------------------------
 
@@ -1975,7 +1988,7 @@ class Scheduler:
         if host is None or not host.up():
             raise CommandError(f"{target.id()[:12]}: its host is not connected")
         try:
-            index = host.job_index(target)
+            index = host.job_index(target.owner(), target.outdir())
         except (HostUnreachable, JobError) as e:
             raise CommandError(f"{target.id()[:12]}: {e}")
         if index is None:
@@ -1993,6 +2006,44 @@ class Scheduler:
         if len(shown) > FILES_SHOWN:
             lines.append(f"  ... {len(shown) - FILES_SHOWN} more (use --match)")
         return lines
+
+    def _cmd_resolve(self, targets: list[str]) -> list[dict]:
+        """The jobs that experiment names and job id prefixes name, each
+        once, as {"id", "experiment", "outdir", "host", "status"}, for
+        `helper fetch`; only their owners and admins may ask. A target
+        that names an experiment means all its jobs; otherwise it is a job
+        id prefix, resolved as every other command resolves one."""
+        if not targets:
+            raise CommandError("give experiments or job ids")
+        found: dict[str, Job] = {}
+        for target in targets:
+            name = self._named(target)
+            if name in self._experiments:
+                jobs = self._experiments[name].jobs()
+            elif not any(job_id.startswith(name) for job_id in self._jobs):
+                raise CommandError(
+                    f"no experiment named {name!r}, and no job id starts "
+                    f"with {name!r}"
+                )
+            else:
+                jobs = [self._resolve_job(target)]
+            for job in jobs:
+                if not (self._caller.admin or job.owner() == self._caller.user):
+                    raise CommandError(
+                        f"only the owner of {job.id()[:12]} and admins see "
+                        "its files"
+                    )
+                found.setdefault(job.id(), job)
+        return [
+            {
+                "id": job.id(),
+                "experiment": job.experiment(),
+                "outdir": job.outdir().as_posix(),
+                "host": job.host() or "",
+                "status": job.status().value,
+            }
+            for job in found.values()
+        ]
 
     def _cmd_signal(self, jobs: list[str], signal: str) -> list[str]:
         if signal not in self.SIGNALS:

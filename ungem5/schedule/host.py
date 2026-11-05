@@ -323,11 +323,11 @@ class Host:
             ),
         )
 
-    def job_index(self, job: Job) -> dict | None:
-        """The index of the job's outdir (see `runner.write_index`), or
-        None before the job ends."""
+    def job_index(self, user: str, outdir: Path) -> dict | None:
+        """The index of a job's outdir (see `runner.write_index`), or None
+        before the job ends."""
         return json.loads(
-            self._call("job_index", job.owner(), job.outdir().as_posix())
+            self._call("job_index", user, Path(outdir).as_posix())
         )
 
     def statuses(self, jobs: list[Job]) -> list[tuple]:

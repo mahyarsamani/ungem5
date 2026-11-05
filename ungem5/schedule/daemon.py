@@ -38,6 +38,7 @@ from rpyc.utils.helpers import classpartial
 from ..common.log import error, info, install_warning_format
 from ..jobs import settings
 from .dashboard import Dashboard
+from .host import HostUnreachable, JobError
 from .scheduler import Caller, CommandError, Scheduler
 from .state import InstanceLock, StateStore, socket_path, state_dir
 from .worker import PROTOCOL_CONFIG
@@ -116,6 +117,43 @@ class ControlService(rpyc.Service):
             # NOTE: A builtin exception type crosses rpyc cleanly.
             raise ValueError(str(e)) from None
         return json.dumps(lines)
+
+    # NOTE: A job's files reach a console through the scheduler, which
+    # holds the only certificate workers accept and checks, as for the
+    # dashboard, that the caller owns the job or is an admin. Every byte
+    # passes through the scheduler: fine for the result files `helper
+    # fetch` pulls, not meant for bulk data. These run on the connection's
+    # thread, not the scheduler's, so a long fetch never holds up a tick.
+
+    def _check_readable(self, job_id: str) -> None:
+        if not self._scheduler.may_read(self._caller, job_id):
+            raise ValueError(
+                f"only the owner of {job_id[:12]} and admins see its files"
+            )
+
+    def exposed_job_index(self, job_id: str) -> str:
+        """The index of the job's outdir as JSON, "null" before it ends."""
+        job_id = str(job_id)
+        self._check_readable(job_id)
+        try:
+            return json.dumps(self._scheduler.read_job_index(job_id))
+        except (CommandError, HostUnreachable, JobError) as e:
+            raise ValueError(str(e)) from None
+
+    def exposed_read_file(
+        self, job_id: str, path: str, offset: int, length: int
+    ) -> bytes:
+        """Up to `length` bytes at `offset` of a file in the job's index."""
+        job_id = str(job_id)
+        self._check_readable(job_id)
+        try:
+            return bytes(
+                self._scheduler.read_job_file(
+                    job_id, str(path), int(offset), int(length)
+                )
+            )
+        except (CommandError, HostUnreachable, JobError) as e:
+            raise ValueError(str(e)) from None
 
 
 def _setup_logging(directory: Path, name: str, to_stderr: bool) -> logging.Logger:

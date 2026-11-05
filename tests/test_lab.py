@@ -16,7 +16,7 @@ import ungem5.schedule.worker as worker_module
 from ungem5.jobs.resources import Resources
 from ungem5.jobs.script import compile_objects
 from ungem5.jobs.work import Experiment, Job, JobStatus
-from ungem5.schedule.daemon import PeerUidAuthenticator
+from ungem5.schedule.daemon import ControlService, PeerUidAuthenticator
 from ungem5.schedule.dashboard import COOKIE, Dashboard
 from ungem5.schedule.host import Host
 from ungem5.schedule.scheduler import (
@@ -211,6 +211,28 @@ def test_dashboard_tokens_act_as_their_user(tmp_path):
     finally:
         scheduler.stop()
         thread.join(5)
+
+
+def test_only_owners_and_admins_resolve_or_read_a_jobs_files(tmp_path):
+    scheduler, _ = lab_scheduler()
+    _run_as(scheduler, "bob", "load", compiled=compiled(tmp_path, 1))
+    scheduler._tick()
+    with pytest.raises(CommandError, match="only the owner of bob/e-0"):
+        _run_as(scheduler, "alice", "resolve", targets=["bob/e"])
+    (job,) = _run_as(scheduler, "bob", "resolve", targets=["e"])
+    assert (job["id"], job["experiment"], job["host"]) == ("bob/e-0", "bob/e", "h")
+    assert _run_as(scheduler, "boss", "resolve", targets=["bob/e-0"]) == [job]
+    with pytest.raises(CommandError, match="no experiment named 'bob/x', and "):
+        _run_as(scheduler, "bob", "resolve", targets=["x"])
+
+    # NOTE: What a console reads goes through the scheduler, which checks
+    # who asks.
+    service = ControlService(scheduler, None)
+    service._caller = scheduler.caller("alice")
+    with pytest.raises(ValueError, match="only the owner of bob/e-0"):
+        service.exposed_job_index("bob/e-0")
+    with pytest.raises(ValueError, match="only the owner of bob/e-0"):
+        service.exposed_read_file("bob/e-0", "stdout", 0, 10)
 
 
 def test_the_socket_admits_members_of_the_group_only():
