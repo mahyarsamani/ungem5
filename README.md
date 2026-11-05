@@ -29,6 +29,7 @@ Install the same version on every host: workers, the scheduler and consoles exch
 | `helper schedule` | Starts (or attaches to) the scheduler and opens its console. |
 | `helper console` | Reattaches a console to the running scheduler. |
 | `helper certs init` / `issue` | Manages the certificates for mutual TLS between scheduler and workers. |
+| `helper fetch <experiment\|job>... --into DIR [--match GLOB] [--lab]` | Pulls finished jobs' result files through the running scheduler into `DIR/<experiment>/<job>/` (the last two parts of each job's outdir), moving only files whose sha256 changed and keeping their mtimes; by default the files `ungem5.results` and `ungem5.stats` read, and `--match` adds more. |
 
 `helper` finds `project_config.json` by walking up from the current directory.
 A load script defines `Host`s and `Experiment`s; the console compiles it into plain data, so the scheduler never runs user code.
@@ -60,6 +61,7 @@ l1d.to_frame()                     # one row per bucket, with pdf and cdf
 
 `RunSet.from_experiment` keeps the jobs that exited cleanly and left `simulation_finished` (`ungem5.results.jobs.job_status`), and labels each run with `experiment` and its `params.json`.
 `RunSet.from_dirs(paths, ...)` does the same for plain run directories (a list or a glob), with no job status.
+On a machine without the outdir, `helper fetch <experiment> --into DIR` first, then `RunSet.from_experiment(DIR/<experiment>)` reads the copy as it reads the outdir.
 
 ### How the stats are built
 

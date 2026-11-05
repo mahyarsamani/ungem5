@@ -11,6 +11,7 @@ This file is the union of the two tools' memories, so that nothing pending on ei
 ## Current state
 - [merge] Branch `ungem5` (local, from `multiuser` at 599f6a1) holds this work: graphix subtree-imported from `redesign` (848d959) and moved into `ungem5/stats/` and `ungem5/results/`, experiment moved into `ungem5/{cli,jobs,schedule,run,common}/`, the on-disk names renamed (`/etc/ungem5`, `~/.local/state/ungem5`, `/tmp/ungem5-<uid>`, `~/.cache/ungem5/{store,stats}`, `ungem5-<owner>.slice`, `UNGEM5_*`), one pytest suite (287 passed, 6 skipped without `example_data/`), version 0.26.11.1.
 - [merge] Done on `ungem5`: `results/jobs.py` imports the runner's names directly (no `_runner()`, no `HAVE_EXPERIMENT`); the marker names live in `ungem5/jobs/markers.py`, spelled out in the copied `decorators.py` and checked by a test; `ungem5.results` and `import ungem5.stats` need neither pandas nor the scheduler; graphix's README is folded into `README.md`; `examples/sift/` moved; the old-API notebook and the plotting code (`barplot.py`, `markers.py`, `util.py`) are parked in the PhD repo under `under_the_rug/graphix/`.
+- [merge] Done on `ungem5` (phase 5): `helper fetch <experiment|job>... --into DIR [--match GLOB] [--lab]` (`results/fetch.py`, `cli/fetch.py`) pulls through the scheduler's control socket (new `resolve` command, `job_index` and `read_file` on the control service, owner-or-admin checked), only files whose sha256 changed, atomically, with the index's mtime, into `DIR/<outdir parent>/<outdir name>/`; defaults are what `results` and `stats` read (`config.json`, `stats.txt`, `stats_dump_*.txt`, `params.json`, `simulation_finished`, `.job/exit.json`, `.job/launch.json`); 297 tests pass, 6 skipped.
 - [merge] Not moved yet: SIFT, the sandbox, the thesis script, the PhD repo's rules and submodules, and both venvs still use `experiment` and `graphix`.
 - [experiment] Version 0.26.10.2; `main` (93f5c81, `gem5Build` demand separate from build threads) is one commit ahead of `origin/main`, and the PhD repo records a different commit than the checkout.
 - [experiment] Branch `multiuser` (checked out, local only) has eight commits over `main`: resources and memory placement, scripts compiled in the console, the lab scheduler and root workers, memory enforcement, the learned model, `/etc/experiment/config.toml`, bundles with the per-host store and the outdir index, and a bundle fix; 141 tests pass.
@@ -75,14 +76,15 @@ This file is the union of the two tools' memories, so that nothing pending on ei
 - [merge] Should the project's copied `decorators.py` import the marker names from `ungem5`, which needs the venv active in the job?
 - [merge] Editable or pinned install per venv once one package serves daemons and analysis; today graphix is editable and experiment pinned.
 - [merge] Should `results/jobs.py` read the experiment name from `constructor.py` or `.job/run.json`, or should `gem5Experiment` write an `experiment.json` marker?
-- [merge] Is `fetch` through one rpyc socket (about 3.4 GB for 125 runs of 27 MB) enough, with `rsync` printed as the alternative, or should the worker serve files directly?
+- [merge] Is `fetch` through the scheduler (every byte crosses worker to scheduler, then scheduler to console; about 3.4 GB for 125 runs of 27 MB) enough, with `rsync` printed as the alternative, or should the worker serve files directly?
+- [merge] `fetch`'s defaults leave out SIFT's `window.json` (no ungem5 code reads it), so SIFT's `done` needs `--match window.json`; and `--match` adds to the defaults, with no flag to fetch only the matches.
 - [merge] Is graphix ever meant for people outside the lab; if yes, a separate `stats` distribution is the right call.
 - [merge] The word: "the helper source" in the chats against `results/jobs.py` in the plan.
 - [merge] Phase 4 needs a window with nothing running and a plan for jobs mid-flight; closing PRs #1 to #3 and renaming or archiving the GitHub repos is outward-facing and mine.
 
 ## Not done
 Each item carries its side and the date it was last mentioned.
-- cli: `helper fetch <experiment|job>... --into DIR [--match GLOB]` on the outdir index [experiment, 2026-11-04].
+- cli: nothing open; `helper fetch` is done on `ungem5` [merge, 2026-11-04].
 - jobs:
   - SIFT's switchover in `job_defs.py` (`demand` to `Resources(memory=...)`, `SingleSlotBuild` to `gem5Build`), untouched because agents work in SIFT [experiment, 2026-11-04].
   - The first SIFT load from the store must be watched, since discovery listed all of `workloads` as data [experiment, 2026-11-04].
@@ -101,7 +103,7 @@ Each item carries its side and the date it was last mentioned.
   - Drop or keep the parked plotting code, now in the PhD repo under `under_the_rug/graphix/` (moved 2026-11-04) [graphix, 2026-11-03].
   - SIFT's `sift_sets.latency_quantile` could switch to graphix's tail-aware quantiles (NaN against `inf` in the overflow) [graphix, 2026-11-04].
 - results:
-  - `results/fetch.py` [merge, 2026-11-04].
+  - The plan's phase-5 check on a real sandbox experiment: fetch it from a lab host, compare a scalar with the NFS outdir's, and time it [merge, 2026-11-04].
   - One status vocabulary for graphix's `DONE`, `UNFINISHED`, `FAILED`, `RUNNING`, `MISSING` and experiment's `JobStatus` and `resolve_status` [merge, 2026-11-04]; a schema for `exit.json` and `launch.json` [merge, 2026-11-04].
 - common: nothing open; the identifier rename, the `_runner()` removal and pandas-free `results/` are done on `ungem5` [merge, 2026-11-04].
 - deployment:
@@ -123,17 +125,17 @@ Each item carries its side and the date it was last mentioned.
 3. Phase 2 is done on branch `ungem5` (not `merge-graphix`): review its commits (`git log --oneline multiuser..ungem5`).
 4. Phase 3: move the callers (SIFT's `sift_sets.py`, `sift_stats/`, `job_defs.py`, `hosts.py`, `port_proxy_watch.py`, the sandbox scripts) and the living rules; the CSVs stay identical, one sandbox job exits 0, and the tutorials run.
 5. Phase 4: switch `.gitmodules` and the parent symlink, reinstall both venvs in a quiet window, restart the scheduler and cascade worker, and confirm `sift_sets.load` finds the same 125 v5 runs.
-6. Phase 5: `results/fetch.py` and `helper fetch`, preserving mtime; a second fetch transfers zero bytes.
+6. Phase 5 is done on `ungem5` (tests on a real worker and control socket); left: run it on a real sandbox experiment once the scheduler and a worker run this version.
 7. Phase 6: archive the graphix repo, log the merge, and refresh memory and overview.
 8. Independent of the merge: deploy per `deploy/README.md` and the first root test; the SIFT `job_defs.py` switchover and the checkpoint-script port; per-job timeouts; the lab job-id fix; the thesis script diff.
 
 ## Pointers
 - Plans: `docs/plans/2026-11-04-ungem5-merge.md` (the merge), `docs/plans/2026-11-03-graphix-improvements.md` (graphix's); the audit: `briefing-room/20261005-181852-graphix-codebase-audit/summary.md`.
-- CLI: `ungem5/cli/{helper,initialize,build,run,work,schedule,certs}.py`.
+- CLI: `ungem5/cli/{helper,initialize,build,run,work,schedule,certs,fetch}.py`.
 - Jobs: `ungem5/jobs/{work,gem5_work,script,bundle,resources,config_util,settings,markers}.py` and `assets/` (the files `helper initialize` copies).
 - Scheduling: `ungem5/schedule/{scheduler,daemon,console,dashboard,filters,state}.py` with `templates/` and `static/`, and `{host,worker,runner,userio,memory,model}.py`; TLS `ungem5/common/pki.py`; `deploy/`.
 - Backends: `ungem5/run/{build,simulate}.py`.
-- Stats: the core `ungem5/stats/*.py`, `ungem5/stats/stats/`, `ungem5/stats/gem5/`; the job source `ungem5/results/jobs.py`; `fetch.py` is still to come in `results/` and `cli/`.
+- Stats: the core `ungem5/stats/*.py`, `ungem5/stats/stats/`, `ungem5/stats/gem5/`; the job source `ungem5/results/jobs.py`; fetching in `ungem5/results/fetch.py` and `ungem5/cli/fetch.py`.
 - Tests: `tests/` (pytest; `gxtest.py` gives the stats tests a temporary cache; `test_imports.py` checks every module and the old names); `examples/sift/` and the gitignored `example_data/`; the parked plotting code is in the PhD repo under `under_the_rug/graphix/`.
 - Pre-merge trees: `tools/graphix` (untouched) and the `multiuser` branch here; old-to-new paths are in the commit messages on `ungem5`.
 - Callers: SIFT's `projects/sift/{job_defs,hosts}.py`, `analysis/sift_sets.py` and `analysis/sift_stats/`; the sandbox `experiment-test/{run_many,run_example}.py` outside the repo; the thesis `workbench/plots/sift_topdown.py`.
