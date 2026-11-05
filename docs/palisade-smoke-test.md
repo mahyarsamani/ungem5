@@ -1,7 +1,7 @@
 # Smoke test of the ungem5 scheduler on palisade
 
 A single-user run of the new scheduler and one worker on palisade, before `ungem5` becomes the mainline.
-Dry-run on cascade on 2026-11-04 from the `ungem5` branch (`476ea39`), isolated from the live `experiment` daemons: everything below passed there.
+Dry-run on cascade on 2026-11-04 from the `ungem5` branch (`476ea39`, since merged into `main`), isolated from the live `experiment` daemons: everything below passed there.
 palisade: x86_64, 8 cores, 31 GB, Python 3.12.3, home on NFS from glacier like cascade, no `/scr/msamani`, nothing of ours running.
 
 ## What is shared and what is not
@@ -18,8 +18,8 @@ The home directory is shared with cascade, so:
 cd ~/darchr/phd
 python3 -m venv ~/darchr/experiment-test/venv-ungem5
 source ~/darchr/experiment-test/venv-ungem5/bin/activate
-pip install -e "tools/experiment[dev,stats,model]"
-cd tools/experiment && pytest -q      # 287 passed, 6 skipped on cascade
+pip install -e "tools/ungem5[dev,stats,model]"
+cd tools/ungem5 && pytest -q         # 297 passed, 6 skipped on cascade
 ```
 
 ## 2. Certificates
@@ -55,7 +55,7 @@ The dashboard port comes from `--dashboard-port` (default 9200), not from a conf
 In the console:
 
 ```
-palisade> load tools/experiment/examples/smoke/jobs.py
+palisade> load tools/ungem5/examples/smoke/jobs.py
 palisade> hosts
 palisade> jobs --full
 ```
@@ -78,7 +78,7 @@ palisade> files ok                    # .job/{launch,process,exit,files}.json, s
 palisade> memory mem                  # guess, estimate and the past run
 palisade> retry mem --memory 2G       # queued again with at least 2.0G
 palisade> signal kill long -y         # long: sent kill; status killed
-palisade> reload tools/experiment/examples/smoke/jobs.py   # 0 new, 5 updated; finished runs are adopted, not rerun
+palisade> reload tools/ungem5/examples/smoke/jobs.py   # 0 new, 5 updated; finished runs are adopted, not rerun
 palisade> reset --experiment smoke -y # requeues the finished ones; refuses a running job
 palisade> info                        # dashboard URL with token, state file, logs
 palisade> stop                        # jobs keep running
