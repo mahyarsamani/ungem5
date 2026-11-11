@@ -1,6 +1,6 @@
 # ungem5 memory
 
-Last updated: 2026-11-04 (Claude Code, after the merge landed on `main` and the submodule became `tools/ungem5`).
+Last updated: 2026-11-10 (Claude Code; push state checked against GitHub; the rest is as of 2026-11-04, after the merge landed on `main` and the submodule became `tools/ungem5`).
 
 ## What this is
 `ungem5` is the package that merged `experiment` (the `helper` CLI, gem5 builds and runs, and the scheduler that drives lab hosts over mutual-TLS rpyc) with `graphix` (typed gem5 statistics that select, reduce and export to pandas): everything architecture research needs that is not the simulator, by analogy with the uncore.
@@ -8,7 +8,7 @@ Layout option A, decided 2026-11-04: one distribution with the subpackages `cli`
 The merge is complete: the tool repo's `main` holds the package, the PhD repo checks it out as `tools/ungem5`, and this file (founded as the union of the two tools' memories) is its one memory.
 
 ## Current state
-- [repo] `main` is the merged tip (0.26.11.1; `ungem5` and `multiuser` are merged into it and can be deleted); it is 45 commits ahead of `origin/main`, which still is `experiment` 0.26.10.2, so push `tools/ungem5` before the PhD repo and rename the GitHub repo `experiment` to `ungem5` (then fix the pip URL in `deploy/README.md` and the `pyproject` homepage).
+- [repo] `main` is the merged tip (0.26.11.1; `ungem5` and `multiuser` are merged into it and can be deleted); it is pushed (`origin/main` equals it, checked 2026-11-10); the GitHub repo is still named `experiment`, so rename it to `ungem5` (then fix the pip URL in `deploy/README.md`, the `pyproject` homepage, and the PhD repo's `.gitmodules`, whose entry is still called `tools/experiment`).
 - [repo] One pytest suite: 297 passed, 6 skipped without `example_data/`; `test_imports.py` checks every module and refuses the old names.
 - [callers] Everything imports `ungem5`: SIFT's analysis (`sift_sets.py`, `sift_stats/`) and drivers (`job_defs.py` on `Resources`, `SingleSlotBuild` gone, every load script compiles with `compile_script`), the sandbox `run_many.py`, the thesis `sift_topdown.py`, and the living rules; the SIFT side (15 files) is uncommitted and awaits review; the ten v5 CSVs reproduced byte for byte.
 - [installed] The live venvs are behind: `.venv/x86_64` runs the scheduler and the cascade worker from a pinned `experiment` 0.26.10.2 (GitHub 37210e4) plus an editable `graphix` from `tools/graphix`; `.venv/aarch64` has `experiment` only; so the live scheduler cannot reload any SIFT script until the reinstall, and the analyses run from a scratch venv meanwhile.
@@ -104,7 +104,7 @@ Each item carries its side and the date it was last mentioned.
   - Copy `example_data/` and `examples/sift/data/` by hand from `tools/graphix` before it is removed [2026-11-04].
 
 ## Next steps
-1. Mahyar: push `tools/ungem5`, then the PhD repo; rename the GitHub repo and fix the two URLs; push graphix's `redesign`, remove `tools/graphix`, archive graphix and close its PRs.
+1. Mahyar: push the PhD repo (26 commits ahead on 2026-11-10; `tools/ungem5` is pushed); rename the GitHub repo and fix the URLs; push graphix's `redesign` (still local only), remove `tools/graphix`, archive graphix and close its PRs.
 2. Mahyar: review and commit the SIFT diff and the PhD-repo rule edits.
 3. Quiet window: reinstall both venvs (pinned), copy the PKI, restart the scheduler and the cascade worker, reload the SIFT scripts and confirm the 125 v5 runs are adopted.
 4. The palisade smoke test from the runbook, then the phase-5 check of `fetch` on a real experiment.
