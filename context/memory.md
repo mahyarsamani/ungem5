@@ -1,6 +1,6 @@
 # ungem5 memory
 
-Last updated: 2026-11-10 (Claude Code; push state checked against GitHub; the rest is as of 2026-11-04, after the merge landed on `main` and the submodule became `tools/ungem5`).
+Last updated: 2026-11-20 (Claude Code; installs, remotes and processes checked on cascade; the tool's code is as of 2026-11-04).
 
 ## What this is
 `ungem5` is the package that merged `experiment` (the `helper` CLI, gem5 builds and runs, and the scheduler that drives lab hosts over mutual-TLS rpyc) with `graphix` (typed gem5 statistics that select, reduce and export to pandas): everything architecture research needs that is not the simulator, by analogy with the uncore.
@@ -8,10 +8,12 @@ Layout option A, decided 2026-11-04: one distribution with the subpackages `cli`
 The merge is complete: the tool repo's `main` holds the package, the PhD repo checks it out as `tools/ungem5`, and this file (founded as the union of the two tools' memories) is its one memory.
 
 ## Current state
-- [repo] `main` is the merged tip (0.26.11.1; `ungem5` and `multiuser` are merged into it and can be deleted); it is pushed (`origin/main` equals it, checked 2026-11-10); the GitHub repo is still named `experiment`, so rename it to `ungem5` (then fix the pip URL in `deploy/README.md`, the `pyproject` homepage, and the PhD repo's `.gitmodules`, whose entry is still called `tools/experiment`).
+- [repo] `main` is the merged tip (0.26.11.1; `ungem5` and `multiuser` are merged into it and can be deleted); the GitHub repository is renamed `ungem5` and serves `fc2e8ab`, so `main` is one memory commit ahead of it; four places still name `experiment`: this clone's `origin` URL, the URL in the PhD repo's `.gitmodules`, the `pyproject` homepage and the pip URL in `deploy/README.md`.
 - [repo] One pytest suite: 297 passed, 6 skipped without `example_data/`; `test_imports.py` checks every module and refuses the old names.
 - [callers] Everything imports `ungem5`: SIFT's analysis (`sift_sets.py`, `sift_stats/`) and drivers (`job_defs.py` on `Resources`, `SingleSlotBuild` gone, every load script compiles with `compile_script`), the sandbox `run_many.py`, the thesis `sift_topdown.py`, and the living rules; the SIFT side (15 files) is uncommitted and awaits review; the ten v5 CSVs reproduced byte for byte.
-- [installed] The live venvs are behind: `.venv/x86_64` runs the scheduler and the cascade worker from a pinned `experiment` 0.26.10.2 (GitHub 37210e4) plus an editable `graphix` from `tools/graphix`; `.venv/aarch64` has `experiment` only; so the live scheduler cannot reload any SIFT script until the reinstall, and the analyses run from a scratch venv meanwhile.
+- [installed] Both venvs run a pinned `ungem5` 0.26.11.1 (GitHub `fc2e8ab`); `.venv/x86_64` still carries an editable `graphix` from `tools/graphix`.
+- [installed] On 2026-11-20 no scheduler or worker runs on cascade: the old scheduler's state was last written on 2026-11-04, and `~/.local/state/ungem5` and `~/.config/ungem5/pki` do not exist, so the daemons have never started on the new package and no SIFT script has been loaded by it.
+- [callers] The roadmap of 2026-11-20 (`context/roadmap.md` at the PhD root, proposed) makes the scheduler a resource both directions of work share: SIFT's campaign of record and Spectrometer's first campaign (planned for 2026-12-01, the second project to load scripts) need the daemons up.
 - [schedule] Bundles work end to end: two sandbox gem5 jobs ran from the store on cascade after the project directory was moved away; `.job/index.json`, `read_file` on any indexed path and the console command `files <job> [--match GLOB]` are in.
 - [schedule] `STATE_VERSION` is 2 and workers, scheduler and consoles must run the same version; a finished run already in an outdir is adopted, not rerun; the root-only paths (`systemd-run`, cgroup freeze, slice caps) ran only against a fake `systemd-run`.
 - [schedule] The 2026-11-04 dry run on cascade (isolated ports, runtime dir and PKI) passed every path: mutual TLS, launch, exit codes, dependencies, a memory guess refined by the group estimate, `retry --memory`, `signal kill`, `reload` adopting finished runs, `reset`, `stop` and resume from the state file, the dashboard; the runbook is `docs/palisade-smoke-test.md` with `examples/smoke/jobs.py`.
@@ -51,7 +53,7 @@ The merge is complete: the tool repo's `main` holds the package, the PhD repo ch
 ## Constraints and gotchas
 - [schedule] gem5's `hostMemory` is VmSize, not resident memory; lab machines run cgroup v2 and systemd 255, so cgroup freeze works; home is NFS from glacier with `sec=sys`, shared by every lab host, so `~/.config/ungem5/pki` is shared while `~/.local/state/ungem5/<host>/` and `/tmp/ungem5-<uid>` are per host.
 - [cli] `helper` finds `project_config.json` by walking up and resolves every path; the build name comes first (`helper build main ...`, `helper run main <script> -- <args>`); `helper run` returns 0 when gem5 panics, so check the log.
-- [schedule] Certificates live in `~/.config/ungem5/pki/` (the live daemons still read `~/.config/experiment/pki/`; copy it); `socket.getfqdn()` returns the short name on lab machines, so worker certificates need `--san <fqdn>` or TLS fails as a logged timeout; port 9100 on perle is taken.
+- [schedule] Certificates live in `~/.config/ungem5/pki/` (the PKI made under the old name is in `~/.config/experiment/pki/`; copy it); `socket.getfqdn()` returns the short name on lab machines, so worker certificates need `--san <fqdn>` or TLS fails as a logged timeout; port 9100 on perle is taken.
 - [schedule] `/scr` is local, so the gem5 binary must exist on every worker; workers are stateless, so deleting a running job's outdir marks it failed; a job runs in its `cwd`, not its outdir, so commands name output files by absolute path.
 - [schedule] Logs are in `~/.local/state/ungem5/<host>/<name>/`; `UNGEM5_RUNTIME_DIR` overrides the runtime directory for tests but must stay short (a Unix socket path is at most 108 bytes); the dashboard on localhost:9200 is reached by SSH tunnel, and `info` prints its URL and token.
 - [repo] A non-editable install does not pick up `git pull`; the PhD venv has no pytest, so tests run from a scratch venv with `pip install -e ".[dev,stats,model]"`; `setsid nohup` breaks `$!`, so find test workers by port and kill by PID, never `pkill -f`.
@@ -93,10 +95,10 @@ Each item carries its side and the date it was last mentioned.
   - The plan's phase-5 check on a real sandbox experiment: fetch it from a lab host, compare a scalar with the NFS outdir's, and time it [2026-11-04].
   - One status vocabulary for `DONE`, `UNFINISHED`, `FAILED`, `RUNNING`, `MISSING` and the scheduler's `JobStatus` and `resolve_status`; a schema for `exit.json` and `launch.json` [2026-11-04].
 - deployment (Mahyar's):
-  - Push `tools/ungem5` before the PhD repo; rename the GitHub repo to `ungem5` and fix the pip URL in `deploy/README.md` and the `pyproject` homepage [2026-11-04].
-  - Push graphix's `redesign` (five unpushed commits), then `git rm tools/graphix`, archive the GitHub repo, close PRs #1 to #3 and delete `agent/wp2` [2026-11-04].
+  - Fix the four `experiment` URLs left after the GitHub rename, then push `main` here and the PhD repo [2026-11-20].
+  - Push graphix's `redesign` (five unpushed commits), then `git rm tools/graphix`, uninstall its editable copy from `.venv/x86_64`, archive the GitHub repo, close PRs #1 to #3 and delete `agent/wp2` [2026-11-20].
   - Review and commit the SIFT diff (15 files) and the PhD-repo rule edits (`CLAUDE.md`, `context/overview.md`, the `visualization-rules` skill) [2026-11-04].
-  - In a quiet window: `pip uninstall experiment graphix` and a pinned `pip install tools/ungem5[stats]` in `.venv/x86_64` and `.venv/aarch64`, copy the PKI to `~/.config/ungem5/pki`, restart the scheduler and the cascade worker (state starts fresh under `~/.local/state/ungem5`; reloading the SIFT scripts adopts finished runs), and confirm `sift_sets.load` finds the same 125 v5 runs [2026-11-04].
+  - The venvs are reinstalled; what is left: copy the PKI to `~/.config/ungem5/pki`, start the scheduler and the cascade worker (state starts fresh under `~/.local/state/ungem5`; reloading the SIFT scripts adopts finished runs), and confirm `sift_sets.load` finds the same 125 v5 runs [2026-11-20].
   - The palisade smoke test per `docs/palisade-smoke-test.md` [2026-11-04].
   - The lab deployment per `deploy/README.md`: root venv in `/opt/ungem5`, `/etc/ungem5/pki`, worker units, the scheduler unit on liberty, `hosts.py` as admin, then the SIFT scripts [2026-11-03].
 - docs:
@@ -104,9 +106,9 @@ Each item carries its side and the date it was last mentioned.
   - Copy `example_data/` and `examples/sift/data/` by hand from `tools/graphix` before it is removed [2026-11-04].
 
 ## Next steps
-1. Mahyar: push the PhD repo (26 commits ahead on 2026-11-10; `tools/ungem5` is pushed); rename the GitHub repo and fix the URLs; push graphix's `redesign` (still local only), remove `tools/graphix`, archive graphix and close its PRs.
+1. Mahyar: fix the URLs left after the rename, push `main` and the PhD repo (far ahead of its remote); push graphix's `redesign` (still local only), remove `tools/graphix` and its editable install, archive graphix and close its PRs.
 2. Mahyar: review and commit the SIFT diff and the PhD-repo rule edits.
-3. Quiet window: reinstall both venvs (pinned), copy the PKI, restart the scheduler and the cascade worker, reload the SIFT scripts and confirm the 125 v5 runs are adopted.
+3. Copy the PKI, start the scheduler and the cascade worker on the new package, reload the SIFT scripts and confirm the 125 v5 runs are adopted; every campaign of the roadmap waits for this.
 4. The palisade smoke test from the runbook, then the phase-5 check of `fetch` on a real experiment.
 5. The lab deployment per `deploy/README.md` and the first root test on one host.
 6. Independent: per-job timeouts, the lab job-id fix, the status vocabulary and the `exit.json` schema, `GitResource`.
@@ -123,5 +125,5 @@ Each item carries its side and the date it was last mentioned.
 - Callers: SIFT's `projects/sift/{job_defs,hosts,run_se,restore_*,take_*}.py`, `analysis/sift_sets.py` and `analysis/sift_stats/`; the sandbox `experiment-test/{run_many,run_example}.py` outside the repo; the thesis `workbench/plots/sift_topdown.py`.
 
 ## Provenance
-The 2026-11-04 union memory, the merge plan, `context/decisions-log.md`, and the 2026-11-04 session that finished phases 3 to 6: the two agent reports (the SIFT switchover and `helper fetch`), the cascade dry run, `git log` on `main`, and `pytest`.
+The 2026-11-04 union memory, the checks of 2026-11-10 and 2026-11-20 on cascade, the merge plan, `context/decisions-log.md`, and the 2026-11-04 session that finished phases 3 to 6: the two agent reports (the SIFT switchover and `helper fetch`), the cascade dry run, `git log` on `main`, and `pytest`.
 Superseded state (branch and version bookkeeping of the two tools, the open questions the merge answered, the old Next steps) is in `memory-archive.md` under 2026-11-04.
